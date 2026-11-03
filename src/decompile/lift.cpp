@@ -529,11 +529,13 @@ private:
 
     // --- P5: && and || --------------------------------------------------------
 
+    // Blocks are sorted by start; a target that is no block start (the end
+    // of the function) maps to m_blocks.size().
     size_t block_at(size_t ip) const {
-        for (size_t i = 0; i < m_blocks.size(); ++i) {
-            if (m_blocks[i].start == ip) return i;
-        }
-        return m_blocks.size();  // the end
+        auto it = std::lower_bound(m_blocks.begin(), m_blocks.end(), ip,
+                                   [](const Block& b, size_t v) { return b.start < v; });
+        if (it == m_blocks.end() || it->start != ip) return m_blocks.size();
+        return static_cast<size_t>(it - m_blocks.begin());
     }
 
     void compute_preds() {
@@ -601,14 +603,13 @@ private:
     }
 
     void collapse_short_circuits() {
-        bool changed = true;
-        while (changed) {
-            changed = false;
-            for (size_t i = 0; i < m_blocks.size(); ++i) {
-                if (try_collapse(i)) {
-                    changed = true;
-                    break;
-                }
+        // A merge at i can only enable another merge at i or just before it.
+        size_t i = 0;
+        while (i < m_blocks.size()) {
+            if (try_collapse(i)) {
+                if (i > 0) --i;
+            } else {
+                ++i;
             }
         }
     }

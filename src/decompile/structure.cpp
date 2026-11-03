@@ -12,6 +12,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "ir.hpp"
 
+#include <algorithm>
 #include <limits>
 
 namespace papyrus::pex::detail {
@@ -38,10 +39,10 @@ public:
 
 private:
     size_t block_at(size_t ip) const {
-        for (size_t i = 0; i < m_blocks.size(); ++i) {
-            if (m_blocks[i].start == ip) return i;
-        }
-        return m_blocks.size();  // the end of the function
+        auto it = std::lower_bound(m_blocks.begin(), m_blocks.end(), ip,
+                                   [](const Block& b, size_t v) { return b.start < v; });
+        if (it == m_blocks.end() || it->start != ip) return m_blocks.size();  // the end of the function
+        return static_cast<size_t>(it - m_blocks.begin());
     }
 
     size_t code_end() const { return m_blocks.empty() ? 0 : m_blocks.back().end; }
