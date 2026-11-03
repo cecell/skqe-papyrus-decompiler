@@ -500,7 +500,7 @@ static void test_decompile() {
     CHECK(r.all_ok());
     CHECK(r.functions.size() == 2);
     const std::string& p = r.source;
-    CHECK(p.find("Scriptname Sample extends ScriptObject\n") != std::string::npos);
+    CHECK(p.rfind("\xEF\xBB\xBFScriptname Sample extends ScriptObject\n", 0) == 0);
     CHECK(p.find("Float x = 1.5 Hidden\n") != std::string::npos);
     CHECK(p.find("Int Property Count = 5 Auto\n") != std::string::npos);
     CHECK(p.find("Bool Property Ready = True AutoReadOnly\n") != std::string::npos);

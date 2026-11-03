@@ -112,6 +112,10 @@ public:
     }
 
     DecompileResult run() {
+        // The compiler stores strings as UTF-8 and reads a source file by its
+        // byte order mark; without one it assumes the system code page and
+        // re-encodes, which changes every non-ASCII doc string and literal.
+        m_out = "﻿";
         for (const Object& o : m_s.objects) object(o);
         DecompileResult r;
         r.source = std::move(m_out);
@@ -416,6 +420,10 @@ private:
                     later = std::max(later, max_ip(s));
                 }
                 if (later != 0 && k.ip > later) k.implicitCast = true;
+                // For comparison operands an implicit cast is deferred, so one
+                // evaluated in operand order was written. Call arguments get
+                // their implicit casts in order, so nothing follows from that.
+                else if (later != 0 && k.ip < later && e->kind == ExprKind::Binary) k.explicitCast = true;
             }
         }
         // !(a == b) -> a != b
@@ -664,7 +672,11 @@ private:
 
     // --- expressions ----------------------------------------------------------------
 
-    enum class Context { Value, Condition };
+    // Value: assignment, argument, operand, return (the compiler inserts casts
+    // here). Condition: If / While tests, operands of && || and !. Object: the
+    // receiver of a call or property access, and the operand of another cast
+    // (no cast is ever implicit there; the operand's exact type matters).
+    enum class Context { Value, Condition, Object };
 
     std::string name_of(StrIdx v, const Ctx& ctx) const {
         auto it = ctx.names.find(v);
@@ -711,10 +723,12 @@ private:
             if (e.implicitCast) return expr(k, parentPrec, rightOperand, Context::Value, ctx);
             // A same-type cast is never inserted by the compiler (the && / ||
             // ones were removed earlier), so it was written and must stay.
-            if (context == Context::Value && to != from && implicit_cast_ok(from, to)) return expr(k, parentPrec, rightOperand, Context::Value, ctx);
-            // An upcast to an ancestor type is inserted by the compiler too.
-            if (context == Context::Value && to != from && ctx.c->is_subtype(from, to)) return expr(k, parentPrec, rightOperand, Context::Value, ctx);
-            text = expr(k, 8, false, Context::Value, ctx) + " as " + (e.name ? nice_type(e.name) : nice_type(e.type));
+            if (!e.explicitCast && context == Context::Value && to != from && implicit_cast_ok(from, to)) return expr(k, parentPrec, rightOperand, Context::Value, ctx);
+            // An upcast to an ancestor type is inserted by the compiler too,
+            // in value positions only: not on a call's receiver, and not under
+            // another cast (sibling types cast through the common ancestor).
+            if (!e.explicitCast && context == Context::Value && to != from && ctx.c->is_subtype(from, to)) return expr(k, parentPrec, rightOperand, Context::Value, ctx);
+            text = expr(k, 8, false, Context::Object, ctx) + " as " + (e.name ? nice_type(e.name) : nice_type(e.type));
             break;
         }
         case ExprKind::Call: {
@@ -770,23 +784,23 @@ private:
             if (e.call == CallKind::Parent) return "Parent." + fn + "(" + args + ")";
             const Expr& obj = *e.kids[0];
             if (obj.kind == ExprKind::Var && ctx.c->is_self(obj.name)) return fn + "(" + args + ")";
-            return expr(obj, 8, false, Context::Value, ctx) + "." + fn + "(" + args + ")";
+            return expr(obj, 8, false, Context::Object, ctx) + "." + fn + "(" + args + ")";
         }
         case ExprKind::PropGet: {
             const Expr& obj = *e.kids[0];
             if (obj.kind == ExprKind::Var && ctx.c->is_self(obj.name)) return str(e.name);
-            return expr(obj, 8, false, Context::Value, ctx) + "." + str(e.name);
+            return expr(obj, 8, false, Context::Object, ctx) + "." + str(e.name);
         }
         case ExprKind::ArrayNew: {
             std::string t = e.type;
             if (t.size() > 2 && t.compare(t.size() - 2, 2, "[]") == 0) t.resize(t.size() - 2);
             return "new " + nice_type(t) + "[" + expr(*e.kids[0], 0, false, Context::Value, ctx) + "]";
         }
-        case ExprKind::ArrayLen: return expr(*e.kids[0], 8, false, Context::Value, ctx) + ".Length";
+        case ExprKind::ArrayLen: return expr(*e.kids[0], 8, false, Context::Object, ctx) + ".Length";
         case ExprKind::ArrayGet:
-            return expr(*e.kids[0], 8, false, Context::Value, ctx) + "[" + expr(*e.kids[1], 0, false, Context::Value, ctx) + "]";
+            return expr(*e.kids[0], 8, false, Context::Object, ctx) + "[" + expr(*e.kids[1], 0, false, Context::Value, ctx) + "]";
         case ExprKind::ArrayFind: {
-            std::string t = expr(*e.kids[0], 8, false, Context::Value, ctx) + (e.reverse ? ".RFind(" : ".Find(") +
+            std::string t = expr(*e.kids[0], 8, false, Context::Object, ctx) + (e.reverse ? ".RFind(" : ".Find(") +
                             expr(*e.kids[1], 0, false, Context::Value, ctx);
             const Expr& start = *e.kids[2];
             const bool isDefault = e.reverse ? is_minus_one_int(start) : is_zero_int(start);

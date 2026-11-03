@@ -51,6 +51,7 @@ struct Expr {
     std::string op;                  // Unary / Binary
     bool reverse = false;            // ArrayFind: RFind
     bool implicitCast = false;       // Cast: the compiler inserted it (do not print)
+    bool explicitCast = false;       // Cast: the source wrote it (print even when a rule says implicit)
     size_t ip = 0;                   // instruction that produced this node (operands: the consumer's)
     std::vector<ExprPtr> kids;
     // Static type as the compiler saw it (lowercased type name, "" unknown).

@@ -103,7 +103,24 @@ private:
     }
 
     // --- scalars ------------------------------------------------------
+    static bool valid_utf8(std::string_view s) {
+        size_t i = 0;
+        while (i < s.size()) {
+            const unsigned char c = static_cast<unsigned char>(s[i]);
+            size_t n = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : (c >> 3) == 0x1E ? 4 : 0;
+            if (n == 0 || i + n > s.size()) return false;
+            for (size_t k = 1; k < n; ++k) {
+                if ((static_cast<unsigned char>(s[i + k]) & 0xC0) != 0x80) return false;
+            }
+            i += n;
+        }
+        return true;
+    }
+
+    // Strings are UTF-8 as the compiler wrote them; a string that is not
+    // valid UTF-8 (another tool, a damaged file) is escaped byte by byte.
     void quote(std::string_view s) {
+        const bool utf8 = valid_utf8(s);
         m_out += '"';
         for (unsigned char c : s) {
             switch (c) {
@@ -113,7 +130,7 @@ private:
             case '\r': m_out += "\\r"; break;
             case '\t': m_out += "\\t"; break;
             default:
-                if (c < 0x20 || c >= 0x7F) {
+                if (c < 0x20 || c == 0x7F || (c >= 0x80 && !utf8)) {
                     char buf[8];
                     std::snprintf(buf, sizeof buf, "\\u%04X", unsigned(c));
                     m_out += buf;
