@@ -22,7 +22,8 @@ add_library(skqe_papyrus STATIC
     src/layout.cpp
     src/decompile/lift.cpp
     src/decompile/structure.cpp
-    src/decompile/psc_writer.cpp)
+    src/decompile/psc_writer.cpp
+    src/analysis.cpp)
 add_library(skqe::papyrus ALIAS skqe_papyrus)
 target_include_directories(skqe_papyrus PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

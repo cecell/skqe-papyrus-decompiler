@@ -4,6 +4,7 @@
 // arguments.
 // SPDX-License-Identifier: GPL-3.0-only
 #include "inputs.hpp"
+#include "papyrus/analysis.hpp"
 #include "papyrus/canon.hpp"
 #include "papyrus/decompile.hpp"
 #include "papyrus/pex.hpp"
@@ -13,6 +14,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <memory>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -53,6 +55,29 @@ commands
                                --optional-objects declares object parameters
                                "= None" (for import sets that must compile
                                against each other, see docs/ROUNDTRIP.md)
+  refs <input> [--csv] [--callee Name,...]
+                               every integer that reaches a FormID-taking
+                               call (GetFormFromFile, GetForm, GetFormEx, any
+                               call passing an int then a "x.esp" string, plus
+                               --callee names), with its plugin string and
+                               whether it is a literal, propagated from an
+                               assignment, a property default, or dynamic
+  deps <input> [--resolve <dir|bsa>] [--vanilla <dir|bsa>] [--json]
+                               parent chain, types, calls per type, mod
+                               events; with --vanilla, the calls vanilla does
+                               not declare (what the script needs an extender
+                               for)
+  closure <script.pex> --data <Data> [--import <dir;dir>] [--emit <dir>] [--json]
+                               walks every script the script needs, through
+                               compiled files in --data; reports each as
+                               pex / source (a .psc in --import) / missing,
+                               and members the chains do not declare.
+                               --emit writes declarations for the pex ones
+  patch <input> --map <FormIDMap> [--callee Name,...] [--dry-run] [--backup]
+                               renumbers FormID literals paired with the
+                               map's plugin (EslMapLib format), renames the
+                               plugin string when the map says so, writes
+                               the file and reads it back; loose files only
   check --rewrite <input>      read + write every script, compare byte for byte
   check --asm <input> --tools <dir>
                                assemble our listing with PapyrusAssembler.exe
@@ -91,6 +116,14 @@ struct Options {
     std::string imports;
     std::string flags;
     std::vector<std::string> resolve;
+    std::string vanilla;
+    std::string data;
+    std::string emit;
+    std::string map;
+    std::string callees;
+    bool csv = false;
+    bool dryRun = false;
+    bool backup = false;
     bool comments = false;
     bool keepGenerated = false;
     bool optionalObjects = false;
@@ -114,6 +147,14 @@ bool parse(int argc, char** argv, int from, Options& o, const char* cmd) {
         else if (a == "--import" && hasNext) o.imports = argv[++i];
         else if (a == "--flags" && hasNext) o.flags = argv[++i];
         else if (a == "--resolve" && hasNext) o.resolve.push_back(argv[++i]);
+        else if (a == "--vanilla" && hasNext) o.vanilla = argv[++i];
+        else if (a == "--data" && hasNext) o.data = argv[++i];
+        else if (a == "--emit" && hasNext) o.emit = argv[++i];
+        else if (a == "--map" && hasNext) o.map = argv[++i];
+        else if (a == "--callee" && hasNext) o.callees = argv[++i];
+        else if (a == "--csv") o.csv = true;
+        else if (a == "--dry-run") o.dryRun = true;
+        else if (a == "--backup") o.backup = true;
         else if (a == "--comments") o.comments = true;
         else if (a == "--keep-generated") o.keepGenerated = true;
         else if (a == "--optional-objects") o.optionalObjects = true;
@@ -608,6 +649,350 @@ int cmd_check(int argc, char** argv) {
     return pextool::run_roundtrip(ro, items);
 }
 
+// --- refs / deps / closure / patch -------------------------------------------
+
+std::vector<std::string> split_list(const std::string& s, char sep) {
+    std::vector<std::string> out;
+    size_t pos = 0;
+    while (pos <= s.size() && !s.empty()) {
+        size_t semi = s.find(sep, pos);
+        if (semi == std::string::npos) semi = s.size();
+        if (semi > pos) out.push_back(s.substr(pos, semi - pos));
+        pos = semi + 1;
+    }
+    return out;
+}
+
+std::string json_str(std::string_view s) {
+    std::string out = "\"";
+    for (unsigned char c : s) {
+        if (c == '"') out += "\\\"";
+        else if (c == '\\') out += "\\\\";
+        else if (c < 0x20 || c >= 0x7F) {
+            char buf[8];
+            std::snprintf(buf, sizeof buf, "\\u%04X", unsigned(c));
+            out += buf;
+        } else out += static_cast<char>(c);
+    }
+    return out + "\"";
+}
+
+std::string csv_str(std::string_view s) {
+    std::string out = "\"";
+    for (char c : s) {
+        if (c == '"') out += "\"\"";
+        else out += c;
+    }
+    return out + "\"";
+}
+
+int cmd_refs(int argc, char** argv) {
+    Options o;
+    if (!parse(argc, argv, 2, o, "refs")) return 2;
+    std::vector<pextool::Item> items;
+    if (!collect(o, items)) return 2;
+    const std::vector<std::string> extra = split_list(o.callees, ',');
+    std::vector<std::string> rows(items.size());
+    std::atomic<int> failures{0};
+    std::mutex mu;
+    pextool::for_each_parallel(items, o.threads, [&](size_t i, const pextool::Item& it, pextool::Loader& ld) {
+        pex::Script s;
+        if (!load_script(it, ld, s, mu)) {
+            ++failures;
+            return;
+        }
+        std::string text;
+        for (const pex::FormRef& r : pex::find_form_refs(s, extra)) {
+            char hex[16];
+            std::snprintf(hex, sizeof hex, "%08X", unsigned(r.formId));
+            if (o.csv) {
+                text += csv_str(it.label) + "," + csv_str(r.object) + "," + csv_str(r.state) + "," + csv_str(r.function) + "," +
+                        std::to_string(r.ip) + "," + csv_str(r.callee) + "," + pex::to_string(r.kind) + "," +
+                        (r.kind == pex::RefKind::Dynamic ? std::string() : std::string(hex)) + "," + csv_str(r.plugin) + "," +
+                        (r.pluginLiteral ? "literal" : (r.plugin.empty() ? "" : "variable")) + "," + csv_str(r.variable) + "\n";
+            } else {
+                text += "{\"file\":" + json_str(it.label) + ",\"object\":" + json_str(r.object) + ",\"state\":" + json_str(r.state) +
+                        ",\"function\":" + json_str(r.function) + ",\"ip\":" + std::to_string(r.ip) + ",\"callee\":" + json_str(r.callee) +
+                        ",\"kind\":\"" + pex::to_string(r.kind) + "\"" +
+                        (r.kind == pex::RefKind::Dynamic ? std::string() : ",\"formId\":" + std::to_string(r.formId) + ",\"formIdHex\":\"" + hex + "\"") +
+                        ",\"plugin\":" + json_str(r.plugin) + ",\"pluginLiteral\":" + (r.pluginLiteral ? "true" : "false") +
+                        (r.variable.empty() ? std::string() : ",\"variable\":" + json_str(r.variable)) + "}\n";
+            }
+        }
+        rows[i] = std::move(text);
+    });
+    if (o.csv) std::fputs("file,object,state,function,ip,callee,kind,formIdHex,plugin,pluginKind,variable\n", stdout);
+    for (const std::string& r : rows) std::fputs(r.c_str(), stdout);
+    return failures ? 1 : 0;
+}
+
+int cmd_deps(int argc, char** argv) {
+    Options o;
+    if (!parse(argc, argv, 2, o, "deps")) return 2;
+    std::vector<pextool::Item> items;
+    if (!collect(o, items)) return 2;
+    std::vector<pextool::Item> extra;
+    if (!collect_resolve(o, extra)) return 2;
+    pextool::ItemResolver resolver;
+    resolver.add(extra);
+    resolver.add(items);
+    std::unique_ptr<pextool::ItemResolver> vanilla;
+    if (!o.vanilla.empty()) {
+        std::vector<pextool::Item> v;
+        std::vector<std::string> warnings;
+        if (!pextool::enumerate(fs::u8path(o.vanilla), v, warnings)) {
+            std::fprintf(stderr, "--vanilla %s: does not exist\n", o.vanilla.c_str());
+            return 2;
+        }
+        vanilla = std::make_unique<pextool::ItemResolver>();
+        vanilla->add(v);
+    }
+    std::vector<std::string> rows(items.size());
+    std::atomic<int> failures{0};
+    std::mutex mu;
+    pextool::for_each_parallel(items, o.threads, [&](size_t i, const pextool::Item& it, pextool::Loader& ld) {
+        pex::Script s;
+        if (!load_script(it, ld, s, mu)) {
+            ++failures;
+            return;
+        }
+        const pex::Dependencies d = pex::find_dependencies(s, &resolver, vanilla.get());
+        std::string t;
+        auto joined = [](const std::set<std::string>& set) {
+            std::string out;
+            for (const std::string& x : set) out += (out.empty() ? "" : ", ") + x;
+            return out;
+        };
+        if (o.json) {
+            t += "{\"file\":" + json_str(it.label) + ",\"name\":" + json_str(d.name) + ",\"parents\":[";
+            for (size_t k = 0; k < d.parents.size(); ++k) t += (k ? "," : "") + json_str(d.parents[k]);
+            t += "],\"parentChainComplete\":" + std::string(d.parentChainComplete ? "true" : "false") + ",\"types\":[";
+            size_t k = 0;
+            for (const std::string& x : d.types) t += (k++ ? "," : "") + json_str(x);
+            t += "],\"calls\":{";
+            k = 0;
+            for (const auto& [type, fns] : d.callsByType) {
+                t += (k++ ? "," : "") + json_str(type) + ":[";
+                size_t m = 0;
+                for (const std::string& f : fns) t += (m++ ? "," : "") + json_str(f);
+                t += "]";
+            }
+            t += "},\"modEvents\":[";
+            k = 0;
+            for (const std::string& x : d.modEvents) t += (k++ ? "," : "") + json_str(x);
+            t += "],\"notInVanilla\":[";
+            k = 0;
+            for (const std::string& x : d.notInVanilla) t += (k++ ? "," : "") + json_str(x);
+            t += "]}\n";
+        } else {
+            t += d.name + "  (" + it.label + ")\n";
+            std::string chain;
+            for (const std::string& p : d.parents) chain += (chain.empty() ? "" : " -> ") + p;
+            t += "  extends:        " + (chain.empty() ? std::string("(nothing)") : chain) + (d.parentChainComplete ? "" : "  [chain incomplete]") + "\n";
+            t += "  types:          " + joined(d.types) + "\n";
+            for (const auto& [type, fns] : d.callsByType) t += "  calls " + type + ": " + joined(fns) + "\n";
+            if (!d.modEvents.empty()) t += "  mod events:     " + joined(d.modEvents) + "\n";
+            if (vanilla) t += "  not in vanilla: " + (d.notInVanilla.empty() ? std::string("(none)") : joined(d.notInVanilla)) + "\n";
+        }
+        rows[i] = std::move(t);
+    });
+    for (const std::string& r : rows) std::fputs(r.c_str(), stdout);
+    return failures ? 1 : 0;
+}
+
+int cmd_closure(int argc, char** argv) {
+    Options o;
+    if (!parse(argc, argv, 2, o, "closure")) return 2;
+    if (o.data.empty()) {
+        std::fprintf(stderr, "closure needs --data <Data folder>\n");
+        return 2;
+    }
+    std::vector<pextool::Item> items;
+    if (!collect(o, items)) return 2;
+    std::vector<pextool::Item> dataItems;
+    std::vector<std::string> warnings;
+    if (!pextool::enumerate(fs::u8path(o.data), dataItems, warnings)) {
+        std::fprintf(stderr, "--data %s: does not exist\n", o.data.c_str());
+        return 2;
+    }
+    pextool::ItemResolver resolver;
+    resolver.add(dataItems);
+    resolver.add(items);
+    const std::vector<std::string> imports = split_list(o.imports, ';');
+    auto hasSource = [&](const std::string& type, std::string& where) {
+        for (const std::string& dir : imports) {
+            std::error_code ec;
+            const fs::path p = fs::u8path(dir) / fs::u8path(type + ".psc");
+            if (fs::exists(p, ec)) {
+                where = p.string();
+                return true;
+            }
+        }
+        return false;
+    };
+    int rc = 0;
+    for (const pextool::Item& it : items) {
+        pextool::Loader ld;
+        pex::Script s;
+        std::mutex mu;
+        if (!load_script(it, ld, s, mu)) {
+            rc = 1;
+            continue;
+        }
+        const pex::Closure c = pex::compute_closure(s, resolver, hasSource, true);
+        size_t nPex = 0, nSrc = 0, nMissing = 0;
+        for (const pex::ClosureEntry& e : c.entries) {
+            if (e.state == pex::DepState::Pex) ++nPex;
+            else if (e.state == pex::DepState::Source) ++nSrc;
+            else ++nMissing;
+        }
+        if (o.json) {
+            std::string t = "{\"file\":" + json_str(it.label) + ",\"complete\":" + (c.complete() ? "true" : "false") + ",\"entries\":[";
+            for (size_t k = 0; k < c.entries.size(); ++k) {
+                const pex::ClosureEntry& e = c.entries[k];
+                t += std::string(k ? "," : "") + "{\"type\":" + json_str(e.type) + ",\"state\":\"" + pex::to_string(e.state) + "\",\"neededBy\":" +
+                     json_str(e.neededBy) + (e.where.empty() ? "" : ",\"where\":" + json_str(e.where)) + "}";
+            }
+            t += "],\"missingMembers\":[";
+            for (size_t k = 0; k < c.missingMembers.size(); ++k) {
+                const pex::MissingMember& m = c.missingMembers[k];
+                t += std::string(k ? "," : "") + "{\"type\":" + json_str(m.type) + ",\"member\":" + json_str(m.member) + ",\"reason\":" + json_str(m.reason) + "}";
+            }
+            t += "]}\n";
+            std::fputs(t.c_str(), stdout);
+        } else {
+            std::printf("%s: %zu scripts in the closure: %zu compiled, %zu source only, %zu missing; %zu members not declared -> %s\n",
+                        it.label.c_str(), c.entries.size(), nPex, nSrc, nMissing, c.missingMembers.size(),
+                        c.complete() ? "complete" : "INCOMPLETE");
+            for (const pex::ClosureEntry& e : c.entries) {
+                if (e.state == pex::DepState::Pex && !o.quiet) continue;
+                std::printf("  %-8s %s%s%s\n", pex::to_string(e.state), e.type.c_str(),
+                            e.neededBy.empty() ? "" : ("  (needed by " + e.neededBy + ")").c_str(), e.where.empty() ? "" : ("  " + e.where).c_str());
+            }
+            for (const pex::MissingMember& m : c.missingMembers) {
+                std::printf("  member   %s.%s: %s\n", m.type.c_str(), m.member.c_str(), m.reason.c_str());
+            }
+        }
+        if (!c.complete()) rc = 1;
+        if (!o.emit.empty()) {
+            std::error_code ec;
+            fs::create_directories(fs::u8path(o.emit), ec);
+            pex::DecompileOptions dopt;
+            dopt.optionalObjectParams = true;
+            dopt.resolver = &resolver;
+            for (const pex::ClosureEntry& e : c.entries) {
+                if (e.state != pex::DepState::Pex) continue;
+                const pex::Script* ps = resolver.find(e.type);
+                if (!ps) continue;
+                const pex::DecompileResult r = pex::decompile(*ps, dopt);
+                const std::string name = ps->objects.empty() ? e.type : std::string(ps->str(ps->objects[0].name));
+                std::ofstream f(fs::u8path(o.emit) / fs::u8path(name + ".psc"), std::ios::binary | std::ios::trunc);
+                f.write(r.source.data(), static_cast<std::streamsize>(r.source.size()));
+            }
+        }
+    }
+    return rc;
+}
+
+int cmd_patch(int argc, char** argv) {
+    Options o;
+    if (!parse(argc, argv, 2, o, "patch")) return 2;
+    if (o.map.empty()) {
+        std::fprintf(stderr, "patch needs --map <FormIDMap file>\n");
+        return 2;
+    }
+    std::vector<pextool::Item> items;
+    if (!collect(o, items)) return 2;
+    std::ifstream mf(fs::u8path(o.map), std::ios::binary);
+    if (!mf) {
+        std::fprintf(stderr, "cannot open %s\n", o.map.c_str());
+        return 2;
+    }
+    const std::string mapText((std::istreambuf_iterator<char>(mf)), std::istreambuf_iterator<char>());
+    pex::FormIdMap map;
+    std::string err;
+    if (!pex::load_formid_map(mapText, map, &err)) {
+        std::fprintf(stderr, "%s: %s\n", o.map.c_str(), err.c_str());
+        return 2;
+    }
+    const std::vector<std::string> extra = split_list(o.callees, ',');
+    std::printf("MAP|%s|%s|%zu entries\n", map.plugin.c_str(), map.newPlugin.c_str(), map.oldToNew.size());
+    std::atomic<int> failures{0};
+    std::mutex mu;
+    std::vector<std::string> rows(items.size());
+    pextool::for_each_parallel(items, o.threads, [&](size_t i, const pextool::Item& it, pextool::Loader& ld) {
+        std::string& out = rows[i];
+        std::vector<uint8_t> bytes;
+        std::string e;
+        pex::Script s;
+        if (!ld.load(it, bytes, e) || pex::read(bytes.data(), bytes.size(), s, &e) != pex::Status::Ok) {
+            out = "ERR|" + it.label + "|" + e + "\n";
+            ++failures;
+            return;
+        }
+        // Only a file we can write back byte-exactly is safe to edit.
+        if (pex::rewrite_check(bytes.data(), bytes.size(), &e) != pex::Status::Ok) {
+            out = "ERR|" + it.label + "|not byte-exact under rewrite: " + e + "\n";
+            ++failures;
+            return;
+        }
+        const pex::PatchResult r = pex::apply_formid_map(s, map, extra);
+        for (const pex::PatchEdit& ed : r.edits) {
+            char buf[256];
+            std::snprintf(buf, sizeof buf, "EDIT|%s|%s%s%s|%u|%s|%08X|%08X|%s\n", it.label.c_str(), ed.state.empty() ? "" : ed.state.c_str(),
+                          ed.state.empty() ? "" : ".", ed.function.c_str(), unsigned(ed.ip), ed.callee.c_str(), unsigned(ed.oldValue),
+                          unsigned(ed.newValue), ed.plugin.c_str());
+            out += buf;
+        }
+        for (const pex::FormRef& sk : r.skipped) {
+            char buf[256];
+            std::snprintf(buf, sizeof buf, "SKIP|%s|%s%s%s|%u|%s|%s|%s\n", it.label.c_str(), sk.state.empty() ? "" : sk.state.c_str(),
+                          sk.state.empty() ? "" : ".", sk.function.c_str(), unsigned(sk.ip), sk.callee.c_str(), pex::to_string(sk.kind),
+                          sk.kind == pex::RefKind::Dynamic ? sk.variable.c_str() : "not in map");
+            out += buf;
+        }
+        for (const std::string& rn : r.renamedStrings) out += "RENAME|" + it.label + "|" + rn + "\n";
+        if (r.edits.empty() && r.renamedStrings.empty()) {
+            out += "UNCHANGED|" + it.label + "\n";
+            return;
+        }
+        if (!it.archive.empty()) {
+            out += "ERR|" + it.label + "|inside an archive: cannot write; extract it first\n";
+            ++failures;
+            return;
+        }
+        if (o.dryRun) {
+            out += "DRYRUN|" + it.label + "|" + std::to_string(r.edits.size()) + " edits, " + std::to_string(r.renamedStrings.size()) + " renames\n";
+            return;
+        }
+        std::vector<uint8_t> newBytes;
+        if (pex::write(s, newBytes, &e) != pex::Status::Ok) {
+            out += "ERR|" + it.label + "|" + e + "\n";
+            ++failures;
+            return;
+        }
+        // Read back and check that every edit took.
+        pex::Script check;
+        if (pex::read(newBytes.data(), newBytes.size(), check, &e) != pex::Status::Ok) {
+            out += "ERR|" + it.label + "|rewritten file does not read back: " + e + "\n";
+            ++failures;
+            return;
+        }
+        std::error_code ec;
+        if (o.backup) fs::copy_file(it.file, fs::path(it.file).concat(".bak"), fs::copy_options::overwrite_existing, ec);
+        std::ofstream f(it.file, std::ios::binary | std::ios::trunc);
+        f.write(reinterpret_cast<const char*>(newBytes.data()), static_cast<std::streamsize>(newBytes.size()));
+        if (!f) {
+            out += "ERR|" + it.label + "|cannot write\n";
+            ++failures;
+            return;
+        }
+        out += "PATCHED|" + it.label + "|" + std::to_string(r.edits.size()) + " edits, " + std::to_string(r.renamedStrings.size()) + " renames\n";
+    });
+    for (const std::string& r : rows) std::fputs(r.c_str(), stdout);
+    return failures ? 1 : 0;
+}
+
 int help() {
     std::fputs(kHelp, stdout);
     return 0;
@@ -642,6 +1027,10 @@ int main(int argc, char** argv_) {
     if (cmd == "json") return cmd_render(argc, argv.data(), "json", ".json", render_json);
     if (cmd == "asm") return cmd_render(argc, argv.data(), "asm", ".pas", render_asm);
     if (cmd == "decompile") return cmd_decompile(argc, argv.data());
+    if (cmd == "refs") return cmd_refs(argc, argv.data());
+    if (cmd == "deps") return cmd_deps(argc, argv.data());
+    if (cmd == "closure") return cmd_closure(argc, argv.data());
+    if (cmd == "patch") return cmd_patch(argc, argv.data());
     if (cmd == "check") return cmd_check(argc, argv.data());
     std::fprintf(stderr, "unknown command %s (pex help)\n", cmd.c_str());
     return 2;

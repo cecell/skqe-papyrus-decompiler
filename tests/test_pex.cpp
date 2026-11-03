@@ -2,6 +2,7 @@
 // rewrite, and damaged variants that must be refused, never crash.
 // `--seeds <dir>` writes the hand-built inputs for the fuzzer.
 // SPDX-License-Identifier: GPL-3.0-only
+#include "papyrus/analysis.hpp"
 #include "papyrus/canon.hpp"
 #include "papyrus/decompile.hpp"
 #include "papyrus/pex.hpp"
@@ -510,6 +511,96 @@ static void test_decompile() {
     CHECK(p.find("::") == std::string::npos);
 }
 
+// A script with FormID calls: literal, propagated through a local, property
+// default, and dynamic.
+//  0 ""  1 "Refs"  2 "ScriptObject"  3 "Int"  4 "Form"  5 "OnInit"  6 "game"
+//  7 "GetFormFromFile"  8 "::temp0"  9 "Foo.esp"  10 "id"  11 "::MyId_var"
+// 12 "MyId"  13 "None"  14 "n"  15 "Other.esm"  16 "Refs.psc"
+static B refs_sample() {
+    B b;
+    b.u32(0xFA57C0DE);
+    b.u8(3); b.u8(2); b.u16(1); b.u64(1);
+    b.str("Refs.psc"); b.str("u"); b.str("c");
+    const char* strings[] = {"", "Refs", "ScriptObject", "Int", "Form", "OnInit", "game", "GetFormFromFile", "::temp0",
+                             "Foo.esp", "id", "::MyId_var", "MyId", "None", "n", "Other.esm", "Refs.psc"};
+    b.u16(17);
+    for (const char* s : strings) b.str(s);
+    b.u8(0);  // no debug
+    b.u16(0); // no user flags
+    b.u16(1);
+    b.u16(1);  // object Refs
+    const size_t sizeAt = b.mark();
+    b.u32(0);
+    b.u16(2); b.u16(0); b.u32(0); b.u16(0);
+    // variables: ::MyId_var Int = 0x900
+    b.u16(1);
+    b.u16(11); b.u16(3); b.u32(0); b.integer(0x900);
+    // properties: MyId auto
+    b.u16(1);
+    b.u16(12); b.u16(3); b.u16(0); b.u32(0); b.u8(7); b.u16(11);
+    // state "" with OnInit(Int n)
+    b.u16(1);
+    b.u16(0);
+    b.u16(1);
+    b.u16(5);
+    b.u16(13); b.u16(0); b.u32(0); b.u8(0);
+    b.u16(1); b.u16(14); b.u16(3);        // param n Int
+    b.u16(2); b.u16(8); b.u16(4); b.u16(10); b.u16(3);  // locals ::temp0 Form, id Int
+    b.u16(5);
+    // 0: CALLSTATIC game GetFormFromFile ::temp0 2 0x801 "Foo.esp"      literal
+    b.u8(0x19); b.ident(6); b.ident(7); b.ident(8); b.integer(2); b.integer(0x801); b.lit(9);
+    // 1: ASSIGN id 0x802
+    b.u8(0x0D); b.ident(10); b.integer(0x802);
+    // 2: CALLSTATIC game GetFormFromFile ::temp0 2 id "Foo.esp"         propagated
+    b.u8(0x19); b.ident(6); b.ident(7); b.ident(8); b.integer(2); b.ident(10); b.lit(9);
+    // 3: CALLSTATIC game GetFormFromFile ::temp0 2 ::MyId_var "Other.esm"  property default
+    b.u8(0x19); b.ident(6); b.ident(7); b.ident(8); b.integer(2); b.ident(11); b.lit(15);
+    // 4: CALLSTATIC game GetFormFromFile ::temp0 2 n "Foo.esp"          dynamic
+    b.u8(0x19); b.ident(6); b.ident(7); b.ident(8); b.integer(2); b.ident(14); b.lit(9);
+    b.patch32(sizeAt, uint32_t(b.mark() - sizeAt));
+    return b;
+}
+
+static void test_refs_and_patch() {
+    const B b = refs_sample();
+    Script s;
+    std::string err;
+    CHECK_STATUS(read(b.v.data(), b.v.size(), s, &err), Status::Ok);
+    CHECK_STATUS(rewrite_check(b.v.data(), b.v.size(), &err), Status::Ok);
+    const std::vector<FormRef> refs = find_form_refs(s);
+    CHECK(refs.size() == 4);
+    if (refs.size() == 4) {
+        CHECK(refs[0].kind == RefKind::Literal && refs[0].formId == 0x801 && refs[0].plugin == "Foo.esp" && refs[0].pluginLiteral);
+        CHECK(refs[1].kind == RefKind::Propagated && refs[1].formId == 0x802 && refs[1].literalIp == 1 && refs[1].variable == "id");
+        CHECK(refs[2].kind == RefKind::PropertyDefault && refs[2].formId == 0x900 && refs[2].plugin == "Other.esm");
+        CHECK(refs[3].kind == RefKind::Dynamic && refs[3].variable == "n");
+        CHECK(refs[0].callee == "game.GetFormFromFile" && refs[0].function == "OnInit");
+    }
+    FormIdMap map;
+    CHECK(load_formid_map("!PLUGIN=Foo.esp\n!NEWPLUGIN=Bar.esp\n00000801|00000A01\n00000802|00000A02\n# comment\n", map, &err));
+    CHECK(map.plugin == "Foo.esp" && map.newPlugin == "Bar.esp" && map.oldToNew.size() == 2);
+    const PatchResult pr = apply_formid_map(s, map);
+    CHECK(pr.edits.size() == 2);
+    CHECK(pr.skipped.size() == 1 && pr.skipped[0].kind == RefKind::Dynamic);
+    CHECK(pr.renamedStrings.size() == 1);
+    CHECK(s.objects[0].states[0].functions[0].body.code[0].args[3].as_int() == 0xA01);
+    CHECK(s.objects[0].states[0].functions[0].body.code[1].args[1].as_int() == 0xA02);
+    CHECK(s.str(9) == "Bar.esp");
+    // Other.esm untouched.
+    CHECK(s.objects[0].variables[0].initial.as_int() == 0x900);
+    std::vector<uint8_t> out;
+    CHECK_STATUS(write(s, out, &err), Status::Ok);
+    Script again;
+    CHECK_STATUS(read(out.data(), out.size(), again, &err), Status::Ok);
+    const std::vector<FormRef> refs2 = find_form_refs(again);
+    CHECK(refs2.size() == 4 && refs2[0].formId == 0xA01 && refs2[0].plugin == "Bar.esp");
+    // Decompiles with the renamed plugin.
+    const DecompileResult d = decompile(again);
+    CHECK(d.all_ok());
+    CHECK(d.source.find("Game.GetFormFromFile(2561, \"Bar.esp\")") != std::string::npos);
+    CHECK(d.source.find("Int id = 2562") != std::string::npos);
+}
+
 static void write_seeds(const fs::path& dir) {
     std::error_code ec;
     fs::create_directories(dir, ec);
@@ -531,6 +622,7 @@ int main(int argc, char** argv) {
     test_damage();
     test_asm_and_canon();
     test_decompile();
+    test_refs_and_patch();
     if (g_failures) {
         std::fprintf(stderr, "%d failure(s)\n", g_failures);
         return 1;
