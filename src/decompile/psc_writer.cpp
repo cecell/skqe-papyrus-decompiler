@@ -744,6 +744,10 @@ private:
                 if (found.function && found.function->params.size() == e.kids.size() - first) decl = found.function;
                 if (!decl) firstOmitted = last;  // cannot name them: keep the Nones
             }
+            // FormID-taking calls print their integer literals in hex, the way
+            // sources write them (0x000D62). Same compiled value either way.
+            const std::string calleeName = lower(m_s.str(e.name));
+            const bool formIdCall = calleeName == "getformfromfile" || calleeName == "getform" || calleeName == "getformex";
             for (size_t i = first; i < last; ++i) {
                 const Expr& a = *e.kids[i];
                 const bool omitted = i >= firstOmitted && a.kind == ExprKind::Lit && a.lit.type == ValueType::None;
@@ -752,6 +756,12 @@ private:
                 if (i > firstOmitted && decl) {
                     const Script* ds = ctx.c->find_function(e.call == CallKind::Static ? lower(m_s.str(e.cls)) : (e.call == CallKind::Parent ? lower(m_s.str(ctx.c->o.parent)) : e.kids[0]->type), m_s.str(e.name)).script;
                     args += std::string(ds->str(decl->params[i - first].name)) + " = ";
+                }
+                if (formIdCall && i == first && a.kind == ExprKind::Lit && a.lit.type == ValueType::Integer && a.lit.as_int() >= 0) {
+                    char hex[16];
+                    std::snprintf(hex, sizeof hex, "0x%06X", unsigned(a.lit.as_int()));
+                    args += hex;
+                    continue;
                 }
                 args += expr(a, 0, false, Context::Value, ctx);
             }

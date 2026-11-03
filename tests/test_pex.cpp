@@ -597,7 +597,7 @@ static void test_refs_and_patch() {
     // Decompiles with the renamed plugin.
     const DecompileResult d = decompile(again);
     CHECK(d.all_ok());
-    CHECK(d.source.find("Game.GetFormFromFile(2561, \"Bar.esp\")") != std::string::npos);
+    CHECK(d.source.find("Game.GetFormFromFile(0x000A01, \"Bar.esp\")") != std::string::npos);
     CHECK(d.source.find("Int id = 2562") != std::string::npos);
 }
 
