@@ -115,7 +115,7 @@ public:
         // The compiler stores strings as UTF-8 and reads a source file by its
         // byte order mark; without one it assumes the system code page and
         // re-encodes, which changes every non-ASCII doc string and literal.
-        m_out = "﻿";
+        m_out = "\xEF\xBB\xBF";
         for (const Object& o : m_s.objects) object(o);
         DecompileResult r;
         r.source = std::move(m_out);
