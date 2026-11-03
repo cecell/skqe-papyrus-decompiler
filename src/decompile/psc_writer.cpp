@@ -200,29 +200,96 @@ private:
         }
         if (any) line(0, "");
 
+        // Properties, default-state functions and state blocks in source
+        // order. The debug records give the order within each group; the
+        // compiler's temp counter, which runs across every body in source
+        // order, tells how the groups interleave (a property with accessors
+        // declared after a function has higher temp numbers). Items without
+        // temps follow the previous item.
         const SourceLayout layout = source_layout(m_s, o);
-        for (size_t pi : layout.properties) property(o, o.properties[pi]);
-        if (!o.properties.empty()) line(0, "");
-
+        struct Section {
+            int kind;  // 0 property, 1 default-state function, 2 state block
+            size_t index;  // property index / function index / state index
+            long long key;
+        };
+        std::vector<Section> sections;
+        auto temp_key = [&](const Function& f) -> long long {
+            long long best = -1;
+            for (const Param& p : f.locals) {
+                const std::string_view n = m_s.str(p.name);
+                if (n.size() > 6 && starts_with_ci(n, "::temp")) {
+                    long long v = 0;
+                    bool digits = true;
+                    for (size_t i = 6; i < n.size(); ++i) {
+                        if (!std::isdigit(static_cast<unsigned char>(n[i]))) { digits = false; break; }
+                        v = v * 10 + (n[i] - '0');
+                    }
+                    if (digits && (best < 0 || v < best)) best = v;
+                }
+            }
+            return best;
+        };
+        for (size_t pi : layout.properties) {
+            const Property& p = o.properties[pi];
+            long long key = -1;
+            if (p.getter) key = temp_key(*p.getter);
+            if (p.setter) {
+                const long long k = temp_key(*p.setter);
+                if (k >= 0 && (key < 0 || k < key)) key = k;
+            }
+            sections.push_back({0, pi, key});
+        }
+        size_t defaultState = o.states.size();
         for (size_t si : layout.states) {
-            const State& st = o.states[si];
-            const bool isDefault = str(st.name).empty();
-            if (!isDefault) {
+            if (str(o.states[si].name).empty()) {
+                defaultState = si;
+                break;
+            }
+        }
+        if (defaultState < o.states.size()) {
+            for (size_t fi : layout.functions[defaultState]) {
+                const NamedFunction& f = o.states[defaultState].functions[fi];
+                const std::string n = lower(m_s.str(f.name));
+                if (!m_opt.keepGeneratedFunctions && (n == "getstate" || n == "gotostate")) continue;
+                sections.push_back({1, fi, temp_key(f.body)});
+            }
+        }
+        for (size_t si : layout.states) {
+            if (si == defaultState) continue;
+            long long key = -1;
+            for (size_t fi : layout.functions[si]) {
+                const long long k = temp_key(o.states[si].functions[fi].body);
+                if (k >= 0 && (key < 0 || k < key)) key = k;
+            }
+            sections.push_back({2, si, key});
+        }
+        // Items without temps take the key of the previous item.
+        long long last = -1;
+        for (Section& s : sections) {
+            if (s.key < 0) s.key = last;
+            else last = s.key;
+        }
+        std::stable_sort(sections.begin(), sections.end(), [](const Section& a, const Section& b) { return a.key < b.key; });
+
+        int prevKind = -1;
+        for (const Section& sec : sections) {
+            if (sec.kind == 0) {
+                property(o, o.properties[sec.index]);
+                prevKind = 0;
+                continue;
+            }
+            if (prevKind == 0) line(0, "");
+            if (sec.kind == 1) {
+                function(o, o.states[defaultState], o.states[defaultState].functions[sec.index], 0);
+            } else {
+                const State& st = o.states[sec.index];
                 const bool isAuto = lower(m_s.str(o.autoState)) == lower(m_s.str(st.name));
                 line(0, std::string(isAuto ? "Auto State " : "State ") + str(st.name));
-            }
-            for (size_t fi : layout.functions[si]) {
-                const NamedFunction& f = st.functions[fi];
-                if (isDefault && !m_opt.keepGeneratedFunctions) {
-                    const std::string n = lower(m_s.str(f.name));
-                    if (n == "getstate" || n == "gotostate") continue;
-                }
-                function(o, st, f, isDefault ? 0 : 1);
-            }
-            if (!isDefault) {
+                for (size_t fi : layout.functions[sec.index]) function(o, st, st.functions[fi], 1);
                 line(0, "EndState");
                 line(0, "");
             }
+            prevKind = sec.kind;
         }
     }
 
