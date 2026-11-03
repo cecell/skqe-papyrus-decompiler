@@ -19,14 +19,17 @@ add_library(skqe_papyrus STATIC
     src/json_writer.cpp
     src/asm_writer.cpp
     src/canon.cpp
-    src/layout.cpp)
+    src/layout.cpp
+    src/decompile/lift.cpp
+    src/decompile/structure.cpp
+    src/decompile/psc_writer.cpp)
 add_library(skqe::papyrus ALIAS skqe_papyrus)
 target_include_directories(skqe_papyrus PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>)
 target_compile_features(skqe_papyrus PUBLIC cxx_std_17)
 if(MSVC)
-    target_compile_options(skqe_papyrus PRIVATE /W4 /permissive- /utf-8)
+    target_compile_options(skqe_papyrus PRIVATE /W4 /permissive- /utf-8 /EHsc)
 else()
     target_compile_options(skqe_papyrus PRIVATE -Wall -Wextra -Wpedantic)
 endif()

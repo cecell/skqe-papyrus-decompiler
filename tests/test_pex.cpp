@@ -3,6 +3,7 @@
 // `--seeds <dir>` writes the hand-built inputs for the fuzzer.
 // SPDX-License-Identifier: GPL-3.0-only
 #include "papyrus/canon.hpp"
+#include "papyrus/decompile.hpp"
 #include "papyrus/pex.hpp"
 
 #include <cstdio>
@@ -489,6 +490,26 @@ static void test_asm_and_canon() {
     CHECK(!canonical_equal(s, v));
 }
 
+static void test_decompile() {
+    const B b = sample();
+    Script s;
+    std::string err;
+    CHECK_STATUS(read(b.v.data(), b.v.size(), s, &err), Status::Ok);
+    const DecompileResult r = decompile(s);
+    CHECK(r.all_ok());
+    CHECK(r.functions.size() == 2);
+    const std::string& p = r.source;
+    CHECK(p.find("Scriptname Sample extends ScriptObject\n") != std::string::npos);
+    CHECK(p.find("Float x = 1.5 Hidden\n") != std::string::npos);
+    CHECK(p.find("Int Property Count = 5 Auto\n") != std::string::npos);
+    CHECK(p.find("Bool Property Ready = True AutoReadOnly\n") != std::string::npos);
+    CHECK(p.find("Event OnInit()\n") != std::string::npos);
+    CHECK(p.find("    Count += 1\n") != std::string::npos);
+    CHECK(p.find("    Debug.Trace(\"hello\", 0)\n") != std::string::npos);
+    CHECK(p.find("EndEvent\n") != std::string::npos);
+    CHECK(p.find("::") == std::string::npos);
+}
+
 static void write_seeds(const fs::path& dir) {
     std::error_code ec;
     fs::create_directories(dir, ec);
@@ -509,6 +530,7 @@ int main(int argc, char** argv) {
     test_truncations();
     test_damage();
     test_asm_and_canon();
+    test_decompile();
     if (g_failures) {
         std::fprintf(stderr, "%d failure(s)\n", g_failures);
         return 1;

@@ -18,6 +18,8 @@ namespace {
 class Asm {
 public:
     explicit Asm(const Script& s) : m_s(s) {}
+    static std::string quoted_text(std::string_view s) { return quoted(s); }
+    static std::string float_literal(float f) { return float_text(f); }
 
     std::string run() {
         const Header& h = m_s.header;
@@ -248,6 +250,29 @@ private:
 
 std::string to_asm(const Script& script) {
     return Asm(script).run();
+}
+
+std::string format_instruction(const Script& script, const Instruction& ins, size_t ip) {
+    const OpcodeInfo* info = opcode_info(static_cast<uint8_t>(ins.op));
+    std::string text = info ? info->mnemonic : "?";
+    const bool isJump = ins.op == Opcode::Jmp || ins.op == Opcode::JmpT || ins.op == Opcode::JmpF;
+    for (size_t a = 0; a < ins.args.size(); ++a) {
+        const Value& v = ins.args[a];
+        text += ' ';
+        if (isJump && a + 1 == ins.args.size() && v.type == ValueType::Integer) {
+            text += "-> " + std::to_string(static_cast<long long>(ip) + v.as_int());
+            continue;
+        }
+        switch (v.type) {
+        case ValueType::None: text += "None"; break;
+        case ValueType::Identifier: text += std::string(script.str(v.str())); break;
+        case ValueType::String: text += Asm::quoted_text(script.str(v.str())); break;
+        case ValueType::Integer: text += std::to_string(v.as_int()); break;
+        case ValueType::Float: text += Asm::float_literal(v.as_float()); break;
+        case ValueType::Bool: text += v.as_bool() ? "True" : "False"; break;
+        }
+    }
+    return text;
 }
 
 }  // namespace papyrus::pex

@@ -285,4 +285,8 @@ std::string to_json(const Script& script, bool pretty = true);
 // Jump targets become labels; debug line numbers become ";@line N" comments.
 std::string to_asm(const Script& script);
 
+// One instruction as assembly text, jump targets as absolute indices
+// ("JUMPF ::temp0 -> 12"). For diagnostics and the decompiler's stubs.
+std::string format_instruction(const Script& script, const Instruction& ins, size_t ip);
+
 }  // namespace papyrus::pex

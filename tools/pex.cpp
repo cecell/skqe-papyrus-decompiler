@@ -5,8 +5,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "inputs.hpp"
 #include "papyrus/canon.hpp"
+#include "papyrus/decompile.hpp"
 #include "papyrus/pex.hpp"
 #include "process.hpp"
+#include "resolver.hpp"
+#include "roundtrip.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -40,12 +43,29 @@ commands
   info <input>                 header facts and counts (--json)
   json <input> [--out <path>]  the whole model as JSON
   asm <input> [--out <path>]   Papyrus assembly, as PapyrusAssembler reads it
+  decompile <input> [--out <path>] [--resolve <dir|bsa>] [--comments]
+            [--keep-generated] [--optional-objects]
+                               Papyrus source; functions that cannot be
+                               structured are reported and emitted as stubs.
+                               The decompiler consults the other scripts of
+                               the input and of --resolve (usually the Data
+                               folder) for parent chains and declarations.
+                               --optional-objects declares object parameters
+                               "= None" (for import sets that must compile
+                               against each other, see docs/ROUNDTRIP.md)
   check --rewrite <input>      read + write every script, compare byte for byte
   check --asm <input> --tools <dir>
                                assemble our listing with PapyrusAssembler.exe
                                from <dir> (the game's "Papyrus Compiler"
                                folder) and compare the result with the
                                original at model level
+  check --roundtrip <input> --tools <dir> [--import <dir;dir>] [--flags <flg>]
+            [--resolve <dir|bsa>]
+                               decompile every script, compile the result
+                               with PapyrusCompiler.exe (the decompiled set
+                               is its own import folder, then --import) and
+                               compare with the original at model level;
+                               prints the share that comes back identical
   help
 
   For json and asm, --out is a file for one script and a directory for many
@@ -67,6 +87,13 @@ struct Options {
     bool keep = false;
     bool rewrite = false;
     bool asmCheck = false;
+    bool roundtrip = false;
+    std::string imports;
+    std::string flags;
+    std::vector<std::string> resolve;
+    bool comments = false;
+    bool keepGenerated = false;
+    bool optionalObjects = false;
     std::string out;
     std::string tools;
     std::string work;
@@ -83,6 +110,13 @@ bool parse(int argc, char** argv, int from, Options& o, const char* cmd) {
         else if (a == "--keep") o.keep = true;
         else if (a == "--rewrite") o.rewrite = true;
         else if (a == "--asm") o.asmCheck = true;
+        else if (a == "--roundtrip") o.roundtrip = true;
+        else if (a == "--import" && hasNext) o.imports = argv[++i];
+        else if (a == "--flags" && hasNext) o.flags = argv[++i];
+        else if (a == "--resolve" && hasNext) o.resolve.push_back(argv[++i]);
+        else if (a == "--comments") o.comments = true;
+        else if (a == "--keep-generated") o.keepGenerated = true;
+        else if (a == "--optional-objects") o.optionalObjects = true;
         else if (a == "--out" && hasNext) o.out = argv[++i];
         else if (a == "--tools" && hasNext) o.tools = argv[++i];
         else if (a == "--work" && hasNext) o.work = argv[++i];
@@ -105,6 +139,19 @@ bool collect(const Options& o, std::vector<pextool::Item>& items) {
     for (const std::string& in : o.inputs) {
         if (!pextool::enumerate(fs::u8path(in), items, warnings)) {
             std::fprintf(stderr, "%s: does not exist\n", in.c_str());
+            return false;
+        }
+    }
+    for (const std::string& w : warnings) std::fprintf(stderr, "warning: %s\n", w.c_str());
+    return true;
+}
+
+// The extra compiled scripts named by --resolve.
+bool collect_resolve(const Options& o, std::vector<pextool::Item>& items) {
+    std::vector<std::string> warnings;
+    for (const std::string& in : o.resolve) {
+        if (!pextool::enumerate(fs::u8path(in), items, warnings)) {
+            std::fprintf(stderr, "--resolve %s: does not exist\n", in.c_str());
             return false;
         }
     }
@@ -259,7 +306,10 @@ int cmd_render(int argc, char** argv, const char* cmd, const char* ext,
     }
     std::error_code ec;
     const bool toDir = items.size() > 1 || (!o.out.empty() && fs::is_directory(fs::u8path(o.out), ec));
-    if (toDir) fs::create_directories(fs::u8path(o.out), ec);
+    if (toDir) {
+        fs::create_directories(fs::u8path(o.out), ec);
+        items = pextool::effective_scripts(items);
+    }
     std::mutex mu;
     std::atomic<int> failures{0};
     pextool::for_each_parallel(items, o.threads, [&](size_t, const pextool::Item& it, pextool::Loader& ld) {
@@ -289,6 +339,85 @@ int cmd_render(int argc, char** argv, const char* cmd, const char* ext,
 
 std::string render_json(const pex::Script& s) { return pex::to_json(s, true); }
 std::string render_asm(const pex::Script& s) { return pex::to_asm(s); }
+
+// --- decompile ---------------------------------------------------------------
+
+int cmd_decompile(int argc, char** argv) {
+    Options o;
+    if (!parse(argc, argv, 2, o, "decompile")) return 2;
+    std::vector<pextool::Item> items;
+    if (!collect(o, items)) return 2;
+    if (items.size() > 1 && o.out.empty()) {
+        std::fprintf(stderr, "decompile: %zu scripts; give --out <directory>\n", items.size());
+        return 2;
+    }
+    std::error_code ec;
+    const bool toDir = items.size() > 1 || (!o.out.empty() && fs::is_directory(fs::u8path(o.out), ec));
+    if (toDir) {
+        fs::create_directories(fs::u8path(o.out), ec);
+        items = pextool::effective_scripts(items);
+    }
+    std::vector<pextool::Item> extra;
+    if (!collect_resolve(o, extra)) return 2;
+    pextool::ItemResolver resolver;
+    resolver.add(extra);
+    resolver.add(items);
+    pex::DecompileOptions dopt;
+    dopt.lineComments = o.comments;
+    dopt.keepGeneratedFunctions = o.keepGenerated;
+    dopt.optionalObjectParams = o.optionalObjects;
+    dopt.resolver = &resolver;
+    std::mutex mu;
+    std::atomic<int> failures{0};
+    std::atomic<size_t> functions{0}, failedFunctions{0}, namedTemps{0};
+    const auto t0 = std::chrono::steady_clock::now();
+    pextool::for_each_parallel(items, o.threads, [&](size_t, const pextool::Item& it, pextool::Loader& ld) {
+        pex::Script s;
+        if (!load_script(it, ld, s, mu)) {
+            ++failures;
+            return;
+        }
+        const pex::DecompileResult r = pex::decompile(s, dopt);
+        for (const pex::FunctionReport& f : r.functions) {
+            ++functions;
+            if (f.status == pex::FnStatus::Failed) {
+                ++failedFunctions;
+                if (!o.quiet) {
+                    std::lock_guard<std::mutex> lk(mu);
+                    std::fprintf(stderr, "%s: %s%s%s: %s at instruction %u\n", it.label.c_str(),
+                                 f.state.empty() ? "" : f.state.c_str(), f.state.empty() ? "" : ".", f.name.c_str(),
+                                 f.reason.c_str(), unsigned(f.ip));
+                }
+            } else if (f.status == pex::FnStatus::OkMaterialisedTemps) {
+                ++namedTemps;
+            }
+        }
+        if (!r.all_ok()) ++failures;
+        if (o.out.empty()) {
+            std::fwrite(r.source.data(), 1, r.source.size(), stdout);
+            return;
+        }
+        fs::path target = fs::u8path(o.out);
+        if (toDir) {
+            std::string name = s.objects.empty() ? it.name : std::string(s.str(s.objects[0].name));
+            target /= fs::u8path(name + ".psc");
+        }
+        std::ofstream f(target, std::ios::binary | std::ios::trunc);
+        if (!f) {
+            ++failures;
+            std::lock_guard<std::mutex> lk(mu);
+            std::fprintf(stderr, "%s: cannot write %s\n", it.label.c_str(), target.string().c_str());
+            return;
+        }
+        f.write(r.source.data(), static_cast<std::streamsize>(r.source.size()));
+    });
+    if (items.size() > 1 || o.quiet) {
+        const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        std::fprintf(stderr, "scripts %zu  functions %zu  failed %zu  named-temps %zu  %.1fs\n", items.size(),
+                     functions.load(), failedFunctions.load(), namedTemps.load(), secs);
+    }
+    return failures ? 1 : 0;
+}
 
 // --- check ----------------------------------------------------------------
 
@@ -432,7 +561,9 @@ int check_asm(const Options& o, const std::vector<pextool::Item>& items) {
             return;
         }
         std::vector<pex::Difference> diffs;
-        if (!pex::canonical_equal(original, assembled, &diffs)) {
+        pex::CompareOptions co;
+        co.compareHeader = false;  // the assembler always writes version 3.2
+        if (!pex::canonical_equal(original, assembled, &diffs, co)) {
             tally.fail(it, "model differs", difference_text(diffs));
             return;
         }
@@ -446,13 +577,35 @@ int check_asm(const Options& o, const std::vector<pextool::Item>& items) {
 int cmd_check(int argc, char** argv) {
     Options o;
     if (!parse(argc, argv, 2, o, "check")) return 2;
-    if (o.rewrite == o.asmCheck) {
-        std::fprintf(stderr, "check: give exactly one of --rewrite, --asm (pex help)\n");
+    if (int(o.rewrite) + int(o.asmCheck) + int(o.roundtrip) != 1) {
+        std::fprintf(stderr, "check: give exactly one of --rewrite, --asm, --roundtrip (pex help)\n");
         return 2;
     }
     std::vector<pextool::Item> items;
     if (!collect(o, items)) return 2;
-    return o.rewrite ? check_rewrite(o, items) : check_asm(o, items);
+    if (o.rewrite) return check_rewrite(o, items);
+    if (o.asmCheck) return check_asm(o, items);
+    if (o.tools.empty()) {
+        std::fprintf(stderr, "check --roundtrip needs --tools <Papyrus Compiler folder>\n");
+        return 2;
+    }
+    pextool::RoundtripOptions ro;
+    if (!collect_resolve(o, ro.resolveItems)) return 2;
+    items = pextool::effective_scripts(items);
+    ro.tools = fs::u8path(o.tools);
+    if (!o.flags.empty()) ro.flags = fs::u8path(o.flags);
+    if (!o.work.empty()) ro.work = fs::u8path(o.work);
+    ro.keep = o.keep;
+    ro.quiet = o.quiet;
+    ro.threads = o.threads;
+    size_t pos = 0;
+    while (pos <= o.imports.size() && !o.imports.empty()) {
+        size_t semi = o.imports.find(';', pos);
+        if (semi == std::string::npos) semi = o.imports.size();
+        if (semi > pos) ro.imports.push_back(fs::u8path(o.imports.substr(pos, semi - pos)));
+        pos = semi + 1;
+    }
+    return pextool::run_roundtrip(ro, items);
 }
 
 int help() {
@@ -488,6 +641,7 @@ int main(int argc, char** argv_) {
     if (cmd == "info") return cmd_info(argc, argv.data());
     if (cmd == "json") return cmd_render(argc, argv.data(), "json", ".json", render_json);
     if (cmd == "asm") return cmd_render(argc, argv.data(), "asm", ".pas", render_asm);
+    if (cmd == "decompile") return cmd_decompile(argc, argv.data());
     if (cmd == "check") return cmd_check(argc, argv.data());
     std::fprintf(stderr, "unknown command %s (pex help)\n", cmd.c_str());
     return 2;

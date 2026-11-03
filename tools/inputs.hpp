@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -102,6 +103,26 @@ inline bool enumerate(const fs::path& input, std::vector<Item>& items, std::vect
     item.label = input.string();
     items.push_back(std::move(item));
     return true;
+}
+
+// Keeps one item per script name: a loose file beats an archive copy (the
+// game's rule), and among equals the later one wins. For output folders and
+// import sets, where two files cannot share a name.
+inline std::vector<Item> effective_scripts(const std::vector<Item>& items) {
+    std::map<std::string, size_t> byName;
+    std::vector<Item> out;
+    for (const Item& it : items) {
+        std::string key = it.name;
+        std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+        auto f = byName.find(key);
+        if (f == byName.end()) {
+            byName[key] = out.size();
+            out.push_back(it);
+        } else if (!(out[f->second].archive.empty() && !it.archive.empty())) {
+            out[f->second] = it;
+        }
+    }
+    return out;
 }
 
 // Loads an item's bytes. Archive readers are opened per thread and cached by

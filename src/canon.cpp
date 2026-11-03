@@ -34,7 +34,11 @@ std::string lower(std::string_view s) {
 }
 
 bool is_temp(std::string_view name) {
-    return name.size() > 6 && (name[0] == ':' && name[1] == ':') && lower(name.substr(0, 6)) == "::temp";
+    if (name.size() <= 6 || lower(name.substr(0, 6)) != "::temp") return false;
+    for (size_t i = 6; i < name.size(); ++i) {
+        if (!std::isdigit(static_cast<unsigned char>(name[i]))) return false;
+    }
+    return true;
 }
 
 // One operand in canonical text form.
@@ -336,7 +340,7 @@ public:
     }
 
     void script(const CScript& a, const CScript& b) {
-        if (a.major != b.major || a.minor != b.minor || a.gameId != b.gameId) {
+        if (m_opt.compareHeader && (a.major != b.major || a.minor != b.minor || a.gameId != b.gameId)) {
             add(DiffKind::Header, "", "version or game id differ");
         }
         if (a.userFlags != b.userFlags) add(DiffKind::UserFlags, "", "user flag table differs");

@@ -48,6 +48,9 @@ struct CompareOptions {
     // numbering differs but the structure is the same (renumber by first
     // appearance before comparing). Off: temp names must match literally.
     bool renumberTemps = false;
+    // Compare the header's version and game id. Off for the assembler check:
+    // Bethesda's assembler always writes 3.2, and old mods carry 3.1.
+    bool compareHeader = true;
     // Stop after this many differences (0 = all).
     size_t maxDifferences = 50;
 };
