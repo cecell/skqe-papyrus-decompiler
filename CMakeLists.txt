@@ -16,7 +16,10 @@ add_library(skqe_papyrus STATIC
     src/pex_model.cpp
     src/pex_read.cpp
     src/pex_write.cpp
-    src/json_writer.cpp)
+    src/json_writer.cpp
+    src/asm_writer.cpp
+    src/canon.cpp
+    src/layout.cpp)
 add_library(skqe::papyrus ALIAS skqe_papyrus)
 target_include_directories(skqe_papyrus PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

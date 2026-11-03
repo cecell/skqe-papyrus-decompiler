@@ -1,0 +1,576 @@
+.info
+  .source "Probe01_AllOps.psc"
+  .modifyTime 1793743743
+  .compileTime 1793743744
+  .user "user"
+  .computer "machine"
+.endInfo
+.userFlagsRef
+  .flag conditional 1
+  .flag hidden 0
+.endUserFlagsRef
+.objectTable
+  .object Probe01_AllOps ObjectReference
+    .userFlags 0
+    .docString "Probe: every operator and statement shape, to learn the compiler's lowering and the assembler's syntax."
+    .autoState Busy
+    .variableTable
+      .variable ::Count_var int
+        .userFlags 0
+        .initialValue None
+      .endVariable
+      .variable ::Speed_var float
+        .userFlags 0
+        .initialValue 1.5
+      .endVariable
+      .variable ::Ready_var bool
+        .userFlags 0
+        .initialValue None
+      .endVariable
+      .variable ::Target_var actor
+        .userFlags 2
+        .initialValue None
+      .endVariable
+      .variable hiddenCounter Int
+        .userFlags 0
+        .initialValue 7
+      .endVariable
+      .variable samples Float[]
+        .userFlags 0
+        .initialValue None
+      .endVariable
+      .variable name String
+        .userFlags 0
+        .initialValue "n"
+      .endVariable
+    .endVariableTable
+    .propertyTable
+	  .property Count Int auto
+	    .userFlags 0
+	    .docString ""
+	    .autoVar ::Count_var
+	  .endProperty
+	  .property Speed Float auto
+	    .userFlags 0
+	    .docString ""
+	    .autoVar ::Speed_var
+	  .endProperty
+	  .property Ready Bool auto
+	    .userFlags 1
+	    .docString ""
+	    .autoVar ::Ready_var
+	  .endProperty
+	  .property Label String
+	    .userFlags 0
+	    .docString ""
+	    .function get 
+	      .userFlags 0
+	      .docString ""
+	      .return string
+	      .paramTable
+	      .endParamTable
+	      .localTable
+	      .endLocalTable
+	      .code
+	        RETURN "x" ;@line 7
+	      .endCode
+	    .endFunction
+	  .endProperty
+	  .property Target Actor auto
+	    .userFlags 0
+	    .docString ""
+	    .autoVar ::Target_var
+	  .endProperty
+	  .property Computed Int
+	    .userFlags 0
+	    .docString ""
+	    .function Get 
+	      .userFlags 0
+	      .docString ""
+	      .return Int
+	      .paramTable
+	      .endParamTable
+	      .localTable
+	        .local ::temp0 int
+	      .endLocalTable
+	      .code
+	        IMULTIPLY ::temp0 ::Count_var 2 ;@line 11
+	        RETURN ::temp0 ;@line 11
+	      .endCode
+	    .endFunction
+	    .function Set 
+	      .userFlags 0
+	      .docString ""
+	      .return NONE
+	      .paramTable
+	        .param value Int
+	      .endParamTable
+	      .localTable
+	        .local ::temp1 int
+	      .endLocalTable
+	      .code
+	        IDIVIDE ::temp1 value 2 ;@line 14
+	        ASSIGN ::Count_var ::temp1 ;@line 14
+	      .endCode
+	    .endFunction
+	  .endProperty
+    .endPropertyTable
+    .stateTable
+      .state
+        .function GetState
+          .userFlags 0
+          .docString "Function that returns the current state"
+          .return String
+          .paramTable
+          .endParamTable
+          .localTable
+          .endLocalTable
+          .code
+            RETURN ::state
+          .endCode
+        .endFunction
+        .function GotoState
+          .userFlags 0
+          .docString "Function that switches this object to the specified state"
+          .return None
+          .paramTable
+            .param newState String
+          .endParamTable
+          .localTable
+            .local ::NoneVar None
+          .endLocalTable
+          .code
+            CALLMETHOD onEndState self ::NoneVar
+            ASSIGN ::state newState
+            CALLMETHOD onBeginState self ::NoneVar
+          .endCode
+        .endFunction
+        .function OnInit 
+          .userFlags 0
+          .docString ""
+          .return NONE
+          .paramTable
+          .endParamTable
+          .localTable
+            .local ::temp2 string
+            .local ::temp3 string
+          .endLocalTable
+          .code
+            ASSIGN ::Count_var 1 ;@line 23
+            ASSIGN ::Speed_var 2.0 ;@line 24
+            CAST ::temp2 ::Count_var ;@line 25
+            STRCAT ::temp2 "hello" ::temp2 ;@line 25
+            STRCAT ::temp2 ::temp2 " " ;@line 25
+            CAST ::temp3 ::Speed_var ;@line 25
+            STRCAT ::temp3 ::temp2 ::temp3 ;@line 25
+            STRCAT ::temp2 ::temp3 " " ;@line 25
+            CAST ::temp3 ::Ready_var ;@line 25
+            STRCAT ::temp3 ::temp2 ::temp3 ;@line 25
+            ASSIGN name ::temp3 ;@line 25
+          .endCode
+        .endFunction
+        .function Arith 
+          .userFlags 0
+          .docString ""
+          .return Int
+          .paramTable
+            .param a Int
+            .param b Int
+            .param f Float
+            .param g Float
+          .endParamTable
+          .localTable
+            .local ::temp4 int
+            .local ::temp5 int
+            .local ::temp6 int
+            .local ::temp7 float
+            .local ::temp8 float
+            .local ::temp9 float
+            .local i Int
+            .local r Float
+          .endLocalTable
+          .code
+            IADD ::temp4 a b ;@line 29
+            IMULTIPLY ::temp5 a b ;@line 29
+            IMOD ::temp6 a b ;@line 29
+            IDIVIDE ::temp5 ::temp5 ::temp6 ;@line 29
+            ISUBTRACT ::temp6 ::temp4 ::temp5 ;@line 29
+            ASSIGN i ::temp6 ;@line 29
+            FADD ::temp7 f g ;@line 30
+            FMULTIPLY ::temp8 f g ;@line 30
+            FSUBTRACT ::temp9 f g ;@line 30
+            FDIVIDE ::temp8 ::temp8 ::temp9 ;@line 30
+            FSUBTRACT ::temp9 ::temp7 ::temp8 ;@line 30
+            ASSIGN r ::temp9 ;@line 30
+            INEGATE ::temp4 i ;@line 31
+            ASSIGN i ::temp4 ;@line 31
+            FNEGATE ::temp7 r ;@line 32
+            ASSIGN r ::temp7 ;@line 32
+            IADD ::temp5 i 1 ;@line 33
+            ASSIGN i ::temp5 ;@line 33
+            FSUBTRACT ::temp8 r 1.0 ;@line 34
+            ASSIGN r ::temp8 ;@line 34
+            IMULTIPLY ::temp6 i 2 ;@line 35
+            ASSIGN i ::temp6 ;@line 35
+            FDIVIDE ::temp9 r 2.0 ;@line 36
+            ASSIGN r ::temp9 ;@line 36
+            IMOD ::temp4 i 3 ;@line 37
+            ASSIGN i ::temp4 ;@line 37
+            CAST ::temp5 r ;@line 38
+            IADD ::temp6 i ::temp5 ;@line 38
+            RETURN ::temp6 ;@line 38
+          .endCode
+        .endFunction
+        .function Compare 
+          .userFlags 0
+          .docString ""
+          .return Bool
+          .paramTable
+            .param a Int
+            .param b Int
+            .param f Float
+          .endParamTable
+          .localTable
+            .local ::temp10 bool
+            .local ::temp11 bool
+            .local eq Bool
+            .local ne Bool
+            .local lt Bool
+            .local le Bool
+            .local gt Bool
+            .local ge Bool
+            .local n Bool
+            .local both Bool
+            .local either Bool
+            .local mixed Bool
+          .endLocalTable
+          .code
+            COMPAREEQ ::temp10 a b ;@line 42
+            ASSIGN eq ::temp10 ;@line 42
+            COMPAREEQ ::temp10 a b ;@line 43
+            NOT ::temp10 ::temp10 ;@line 43
+            ASSIGN ne ::temp10 ;@line 43
+            COMPARELT ::temp10 a b ;@line 44
+            ASSIGN lt ::temp10 ;@line 44
+            COMPARELTE ::temp10 a b ;@line 45
+            ASSIGN le ::temp10 ;@line 45
+            COMPAREGT ::temp10 a b ;@line 46
+            ASSIGN gt ::temp10 ;@line 46
+            COMPAREGTE ::temp10 a b ;@line 47
+            ASSIGN ge ::temp10 ;@line 47
+            NOT ::temp10 eq ;@line 48
+            ASSIGN n ::temp10 ;@line 48
+            CAST ::temp10 eq ;@line 49
+            JUMPF ::temp10 label0 ;@line 49
+            CAST ::temp10 lt ;@line 49
+            label0:
+            ASSIGN both ::temp10 ;@line 49
+            CAST ::temp10 ne ;@line 50
+            JUMPT ::temp10 label1 ;@line 50
+            CAST ::temp10 gt ;@line 50
+            label1:
+            ASSIGN either ::temp10 ;@line 50
+            COMPARELT ::temp10 a b ;@line 51
+            CAST ::temp10 ::temp10 ;@line 51
+            JUMPF ::temp10 label2 ;@line 51
+            COMPAREGT ::temp11 f 1.0 ;@line 51
+            CAST ::temp10 ::temp11 ;@line 51
+            label2:
+            CAST ::temp10 ::temp10 ;@line 51
+            JUMPT ::temp10 label3 ;@line 51
+            NOT ::temp11 ge ;@line 51
+            CAST ::temp10 ::temp11 ;@line 51
+            label3:
+            ASSIGN mixed ::temp10 ;@line 51
+            CAST ::temp11 both ;@line 52
+            JUMPF ::temp11 label4 ;@line 52
+            CAST ::temp11 either ;@line 52
+            label4:
+            CAST ::temp10 ::temp11 ;@line 52
+            JUMPT ::temp10 label5 ;@line 52
+            CAST ::temp10 mixed ;@line 52
+            label5:
+            RETURN ::temp10 ;@line 52
+          .endCode
+        .endFunction
+        .function Flow 
+          .userFlags 0
+          .docString ""
+          .return NONE
+          .paramTable
+            .param n Int
+            .param ref ObjectReference
+          .endParamTable
+          .localTable
+            .local ::temp12 bool
+            .local ::temp13 bool
+            .local ::nonevar none
+            .local ::temp14 int
+            .local k Int
+          .endLocalTable
+          .code
+            COMPARELT ::temp12 n 0 ;@line 56
+            JUMPF ::temp12 label10 ;@line 56
+            CALLSTATIC debug Trace ::nonevar "neg" 0 ;@line 57
+            JUMP label6
+            label10:
+            COMPAREEQ ::temp13 n 0 ;@line 58
+            JUMPF ::temp13 label7 ;@line 58
+            CALLSTATIC debug Trace ::nonevar "zero" 0 ;@line 59
+            JUMP label6
+            label7:
+            COMPARELT ::temp13 n 10 ;@line 60
+            CAST ::temp13 ::temp13 ;@line 60
+            JUMPF ::temp13 label8 ;@line 60
+            CAST ::temp13 ref ;@line 60
+            label8:
+            JUMPF ::temp13 label9 ;@line 60
+            CALLSTATIC debug Trace ::nonevar "small" 0 ;@line 61
+            JUMP label6
+            label9:
+            CALLSTATIC debug Trace ::nonevar "big" 0 ;@line 63
+            label6:
+            JUMPF ref label12 ;@line 65
+            CALLMETHOD Disable ref ::nonevar false ;@line 66
+            JUMP label11
+            label12:
+            label11:
+            label13:
+            COMPAREGT ::temp13 n 0 ;@line 68
+            JUMPF ::temp13 label14 ;@line 68
+            ISUBTRACT ::temp14 n 1 ;@line 69
+            ASSIGN n ::temp14 ;@line 69
+            COMPAREEQ ::temp12 n 5 ;@line 70
+            JUMPF ::temp12 label16 ;@line 70
+            RETURN none ;@line 71
+            JUMP label15
+            label16:
+            label15:
+            label17:
+            COMPAREGT ::temp12 n 7 ;@line 73
+            JUMPF ::temp12 label18 ;@line 73
+            ISUBTRACT ::temp14 n 2 ;@line 74
+            ASSIGN n ::temp14 ;@line 74
+            JUMP label17
+            label18:
+            JUMP label13
+            label14:
+            ASSIGN k 0 ;@line 77
+            label19:
+            COMPARELT ::temp12 k 3 ;@line 78
+            JUMPF ::temp12 label20 ;@line 78
+            IADD ::temp14 k 1 ;@line 79
+            ASSIGN k ::temp14 ;@line 79
+            JUMP label19
+            label20:
+          .endCode
+        .endFunction
+        .function EarlyReturn 
+          .userFlags 0
+          .docString ""
+          .return Int
+          .paramTable
+            .param n Int
+          .endParamTable
+          .localTable
+            .local ::temp15 bool
+          .endLocalTable
+          .code
+            COMPAREGT ::temp15 n 3 ;@line 84
+            JUMPF ::temp15 label22 ;@line 84
+            RETURN 1 ;@line 85
+            JUMP label21
+            label22:
+            label21:
+            COMPAREGT ::temp15 n 1 ;@line 87
+            JUMPF ::temp15 label24 ;@line 87
+            RETURN 2 ;@line 88
+            JUMP label23
+            label24:
+            RETURN 3 ;@line 90
+            label23:
+          .endCode
+        .endFunction
+        .function Arrays 
+          .userFlags 0
+          .docString ""
+          .return NONE
+          .paramTable
+          .endParamTable
+          .localTable
+            .local ::temp16 float[]
+            .local ::temp17 float
+            .local ::temp18 float
+            .local ::temp19 int
+            .local ::temp20 string[]
+            .local ::temp21 string
+            .local len Int
+            .local at Int
+            .local rat Int
+            .local at2 Int
+            .local names String[]
+          .endLocalTable
+          .code
+            ARRAYCREATE ::temp16 5 ;@line 95
+            ASSIGN samples ::temp16 ;@line 95
+            ASSIGN ::temp17 1.0 ;@line 96
+            ARRAYSETELEMENT samples 0 ::temp17 ;@line 96
+            ARRAYGETELEMENT ::temp18 samples 0 ;@line 97
+            FADD ::temp18 ::temp18 1.0 ;@line 97
+            ASSIGN ::temp17 ::temp18 ;@line 97
+            ARRAYSETELEMENT samples 1 ::temp17 ;@line 97
+            ARRAYLENGTH ::temp19 samples ;@line 98
+            ASSIGN len ::temp19 ;@line 98
+            ARRAYFINDELEMENT samples ::temp19 2.0 0 ;@line 99
+            ASSIGN at ::temp19 ;@line 99
+            ARRAYRFINDELEMENT samples ::temp19 1.0 -1 ;@line 100
+            ASSIGN rat ::temp19 ;@line 100
+            ARRAYFINDELEMENT samples ::temp19 2.0 1 ;@line 101
+            ASSIGN at2 ::temp19 ;@line 101
+            ARRAYCREATE ::temp20 2 ;@line 102
+            ASSIGN names ::temp20 ;@line 102
+            ASSIGN ::temp21 name ;@line 103
+            ARRAYSETELEMENT names 0 ::temp21 ;@line 103
+          .endCode
+        .endFunction
+        .function Calls 
+          .userFlags 0
+          .docString ""
+          .return NONE
+          .paramTable
+            .param akActor Actor
+            .param akForm Form
+          .endParamTable
+          .localTable
+            .local ::nonevar none
+            .local ::temp22 objectreference
+            .local ::temp23 actor
+            .local ::temp24 int
+            .local ::temp25 form
+            .local ::temp26 float
+            .local ::temp27 bool
+            .local ::temp28 string
+            .local ::temp29 probe01_allops
+            .local r ObjectReference
+            .local a Actor
+            .local h Int
+            .local f Form
+            .local g Form
+            .local d Float
+            .local isNone Bool
+            .local asf Float
+            .local ci Int
+            .local s String
+            .local otherCount Int
+          .endLocalTable
+          .code
+            CALLPARENT OnLoad ::nonevar  ;@line 107
+            CALLMETHOD Disable Self ::nonevar false ;@line 108
+            CALLMETHOD Disable self ::nonevar false ;@line 109
+            CAST ::temp22 Self ;@line 110
+            ASSIGN r ::temp22 ;@line 110
+            CAST ::temp23 r ;@line 111
+            ASSIGN a ::temp23 ;@line 111
+            CAST ::temp23 None ;@line 112
+            CALLMETHOD Kill akActor ::nonevar ::temp23 ;@line 112
+            CALLMETHOD GetItemCount akActor ::temp24 akForm ;@line 113
+            ASSIGN h ::temp24 ;@line 113
+            CALLSTATIC game GetFormFromFile ::temp25 3426 "Skyrim.esm" ;@line 114
+            ASSIGN f ::temp25 ;@line 114
+            CALLSTATIC game GetFormFromFile ::temp25 3426 "Update.esm" ;@line 115
+            ASSIGN g ::temp25 ;@line 115
+            CALLSTATIC utility RandomFloat ::temp26 0.0 1.0 ;@line 116
+            ASSIGN d ::temp26 ;@line 116
+            CAST ::temp25 None ;@line 117
+            COMPAREEQ ::temp27 akForm ::temp25 ;@line 117
+            ASSIGN isNone ::temp27 ;@line 117
+            CAST ::temp26 ::Count_var ;@line 118
+            ASSIGN asf ::temp26 ;@line 118
+            CAST ::temp24 ::Speed_var ;@line 119
+            ASSIGN ci ::temp24 ;@line 119
+            CAST ::temp28 ::Count_var ;@line 120
+            ASSIGN s ::temp28 ;@line 120
+            CAST ::temp26 100 ;@line 121
+            CALLMETHOD SetAV akActor ::nonevar "Health" ::temp26 ;@line 121
+            ASSIGN ::Target_var akActor ;@line 122
+            CAST ::temp29 akForm ;@line 123
+            PROPGET Count ::temp29 ::temp24 ;@line 123
+            ASSIGN otherCount ::temp24 ;@line 123
+            ASSIGN ::temp24 5 ;@line 124
+            CAST ::temp29 akForm ;@line 124
+            PROPSET Count ::temp29 ::temp24 ;@line 124
+            CALLMETHOD RegisterForModEvent self ::nonevar "MyEvent" "OnMyEvent" ;@line 125
+            CALLMETHOD GoToState self ::nonevar "Busy" ;@line 126
+            CALLMETHOD GetState self ::temp28  ;@line 127
+            CALLSTATIC debug Trace ::nonevar ::temp28 0 ;@line 127
+          .endCode
+        .endFunction
+        .function OnMyEvent 
+          .userFlags 0
+          .docString ""
+          .return NONE
+          .paramTable
+            .param eventName String
+            .param strArg String
+            .param numArg Float
+            .param sender Form
+          .endParamTable
+          .localTable
+            .local ::temp30 int
+          .endLocalTable
+          .code
+            IADD ::temp30 hiddenCounter 1 ;@line 131
+            ASSIGN hiddenCounter ::temp30 ;@line 131
+          .endCode
+        .endFunction
+        .function Global1 static
+          .userFlags 0
+          .docString ""
+          .return Int
+          .paramTable
+            .param x Int
+          .endParamTable
+          .localTable
+          .endLocalTable
+          .code
+            RETURN x ;@line 135
+          .endCode
+        .endFunction
+      .endState
+      .state busy
+        .function OnActivate 
+          .userFlags 0
+          .docString ""
+          .return NONE
+          .paramTable
+            .param akActionRef ObjectReference
+          .endParamTable
+          .localTable
+            .local ::nonevar none
+          .endLocalTable
+          .code
+            CALLMETHOD GoToState self ::nonevar "" ;@line 140
+          .endCode
+        .endFunction
+        .function Arith 
+          .userFlags 0
+          .docString ""
+          .return Int
+          .paramTable
+            .param a Int
+            .param b Int
+            .param f Float
+            .param g Float
+          .endParamTable
+          .localTable
+          .endLocalTable
+          .code
+            RETURN 0 ;@line 143
+          .endCode
+        .endFunction
+      .endState
+      .state idle
+      .endState
+    .endStateTable
+  .endObject
+.endObjectTable

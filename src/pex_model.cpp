@@ -21,22 +21,22 @@ const char* to_string(Status s) noexcept {
     return "?";
 }
 
-// Mnemonics as PapyrusAssembler spells them. To be confirmed against the
-// compiler's own -keepasm output in the assembly phase (docs/ASM_SYNTAX.md).
+// Mnemonics as PapyrusAssembler spells them, confirmed against the official
+// compiler's -keepasm output (probes/Probe01_AllOps.pas.txt, docs/ASM_SYNTAX.md).
 static const OpcodeInfo kOpcodes[kMaxOpcode + 1] = {
     {"NOP", 0, false},
     {"IADD", 3, false},
     {"FADD", 3, false},
-    {"ISUB", 3, false},
-    {"FSUB", 3, false},
-    {"IMUL", 3, false},
-    {"FMUL", 3, false},
-    {"IDIV", 3, false},
-    {"FDIV", 3, false},
+    {"ISUBTRACT", 3, false},
+    {"FSUBTRACT", 3, false},
+    {"IMULTIPLY", 3, false},
+    {"FMULTIPLY", 3, false},
+    {"IDIVIDE", 3, false},
+    {"FDIVIDE", 3, false},
     {"IMOD", 3, false},
     {"NOT", 2, false},
-    {"INEG", 2, false},
-    {"FNEG", 2, false},
+    {"INEGATE", 2, false},
+    {"FNEGATE", 2, false},
     {"ASSIGN", 2, false},
     {"CAST", 2, false},
     {"COMPAREEQ", 3, false},

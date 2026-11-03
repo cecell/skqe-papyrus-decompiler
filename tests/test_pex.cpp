@@ -2,6 +2,7 @@
 // rewrite, and damaged variants that must be refused, never crash.
 // `--seeds <dir>` writes the hand-built inputs for the fuzzer.
 // SPDX-License-Identifier: GPL-3.0-only
+#include "papyrus/canon.hpp"
 #include "papyrus/pex.hpp"
 
 #include <cstdio>
@@ -442,6 +443,52 @@ static void test_damage() {
     }
 }
 
+static void test_asm_and_canon() {
+    const B b = sample();
+    Script s;
+    std::string err;
+    CHECK_STATUS(read(b.v.data(), b.v.size(), s, &err), Status::Ok);
+    const std::string a = to_asm(s);
+    CHECK(a.find(".object Sample ScriptObject\n") != std::string::npos);
+    CHECK(a.find(".property Count Int auto\n") != std::string::npos);
+    CHECK(a.find(".autoVar ::Count_var\n") != std::string::npos);
+    CHECK(a.find(".property Ready Bool\n") != std::string::npos);
+    CHECK(a.find(".function get\n") != std::string::npos);
+    CHECK(a.find("RETURN True ;@line 20\n") != std::string::npos);
+    CHECK(a.find("IADD ::temp0 ::Count_var 1 ;@line 10\n") != std::string::npos);
+    CHECK(a.find("CALLSTATIC Debug Trace ::NoneVar \"hello\" 0 ;@line 11\n") != std::string::npos);
+    CHECK(a.find(".initialValue 1.5\n") != std::string::npos);
+    CHECK(a.find(".variable x Float\n") != std::string::npos);
+    CHECK(a.find(".flag hidden 0\n") != std::string::npos);
+
+    // Canonical comparison: equal to itself, insensitive to table order and
+    // identifier case, sensitive to an instruction change.
+    Script t = s;
+    CHECK(canonical_equal(s, t));
+    std::swap(t.objects[0].variables[0], t.objects[0].variables[1]);
+    std::swap(t.objects[0].properties[0], t.objects[0].properties[1]);
+    t.strings[9] = "TRACE";
+    CHECK(canonical_equal(s, t));
+    t.objects[0].states[0].functions[0].body.code[0].op = Opcode::ISub;
+    std::vector<Difference> diffs;
+    CHECK(!canonical_equal(s, t, &diffs));
+    CHECK(diffs.size() == 1 && diffs[0].kind == DiffKind::Instruction && diffs[0].where == "sample.oninit");
+    CHECK(diffs[0].message.find("ip 0") != std::string::npos);
+    // A temp renamed: unequal by default, equal with renumbering.
+    Script u = s;
+    u.strings[5] = "::temp7";
+    CHECK(!canonical_equal(s, u));
+    CompareOptions opt;
+    opt.renumberTemps = true;
+    CHECK(canonical_equal(s, u, nullptr, opt));
+    // Debug line counts matter, line numbers do not.
+    Script v = s;
+    v.debug.functions[0].lines[0] = 99;
+    CHECK(canonical_equal(s, v));
+    v.debug.functions[0].lines.pop_back();
+    CHECK(!canonical_equal(s, v));
+}
+
 static void write_seeds(const fs::path& dir) {
     std::error_code ec;
     fs::create_directories(dir, ec);
@@ -461,6 +508,7 @@ int main(int argc, char** argv) {
     test_read_sample();
     test_truncations();
     test_damage();
+    test_asm_and_canon();
     if (g_failures) {
         std::fprintf(stderr, "%d failure(s)\n", g_failures);
         return 1;

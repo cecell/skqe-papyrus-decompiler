@@ -4,20 +4,24 @@
 // arguments.
 // SPDX-License-Identifier: GPL-3.0-only
 #include "inputs.hpp"
+#include "papyrus/canon.hpp"
 #include "papyrus/pex.hpp"
+#include "process.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <map>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
-#include <windows.h>
 #endif
 
 using namespace papyrus;
@@ -33,56 +37,72 @@ usage: pex <command> <input> [options]
   every .bsa) or a single .bsa.
 
 commands
-  info <input>                header facts and counts (--json)
-  json <input> [--out <path>] the whole model as JSON (a file for one script,
-                              a directory for many)
-  check --rewrite <input>     read + write every script and compare byte for byte
-  help [command]
+  info <input>                 header facts and counts (--json)
+  json <input> [--out <path>]  the whole model as JSON
+  asm <input> [--out <path>]   Papyrus assembly, as PapyrusAssembler reads it
+  check --rewrite <input>      read + write every script, compare byte for byte
+  check --asm <input> --tools <dir>
+                               assemble our listing with PapyrusAssembler.exe
+                               from <dir> (the game's "Papyrus Compiler"
+                               folder) and compare the result with the
+                               original at model level
+  help
+
+  For json and asm, --out is a file for one script and a directory for many
+  (one <name>.json / <name>.pas each); without it one script goes to stdout.
 
 common options
-  --threads N                 worker threads (default: all cores)
-  --quiet                     only the summary
+  --threads N                  worker threads (default: all cores)
+  --quiet                      only the summary (checks)
+  --work <dir>                 scratch folder for checks that run tools
+  --keep                       keep the scratch files
 
 exit codes: 0 ok, 1 an input failed or a check found problems, 2 bad arguments
 )";
 
-struct Common {
+struct Options {
     unsigned threads = 0;
     bool quiet = false;
     bool json = false;
+    bool keep = false;
+    bool rewrite = false;
+    bool asmCheck = false;
     std::string out;
+    std::string tools;
+    std::string work;
     std::vector<std::string> inputs;
 };
 
-bool parse_common(int argc, char** argv, int from, Common& c, const char* cmd) {
+bool parse(int argc, char** argv, int from, Options& o, const char* cmd) {
     for (int i = from; i < argc; ++i) {
-        std::string a = argv[i];
+        const std::string a = argv[i];
         const bool hasNext = i + 1 < argc;
-        if (a == "--threads" && hasNext) {
-            c.threads = static_cast<unsigned>(std::atoi(argv[++i]));
-        } else if (a == "--quiet") {
-            c.quiet = true;
-        } else if (a == "--json") {
-            c.json = true;
-        } else if (a == "--out" && hasNext) {
-            c.out = argv[++i];
-        } else if (a.size() > 1 && a[0] == '-' && a != "--rewrite") {
-            std::fprintf(stderr, "%s: unknown option %s (pex help %s)\n", cmd, a.c_str(), cmd);
+        if (a == "--threads" && hasNext) o.threads = static_cast<unsigned>(std::atoi(argv[++i]));
+        else if (a == "--quiet") o.quiet = true;
+        else if (a == "--json") o.json = true;
+        else if (a == "--keep") o.keep = true;
+        else if (a == "--rewrite") o.rewrite = true;
+        else if (a == "--asm") o.asmCheck = true;
+        else if (a == "--out" && hasNext) o.out = argv[++i];
+        else if (a == "--tools" && hasNext) o.tools = argv[++i];
+        else if (a == "--work" && hasNext) o.work = argv[++i];
+        else if (a.size() > 1 && a[0] == '-') {
+            std::fprintf(stderr, "%s: unknown option %s (pex help)\n", cmd, a.c_str());
             return false;
-        } else if (a != "--rewrite") {
-            c.inputs.push_back(a);
+        } else {
+            o.inputs.push_back(a);
         }
     }
     return true;
 }
 
-bool collect(const Common& c, std::vector<pextool::Item>& items) {
-    if (c.inputs.empty()) {
+bool collect(const Options& o, std::vector<pextool::Item>& items) {
+    if (o.inputs.empty()) {
         std::fprintf(stderr, "no input given\n");
         return false;
     }
     std::vector<std::string> warnings;
-    for (const std::string& in : c.inputs) {
+    for (const std::string& in : o.inputs) {
         if (!pextool::enumerate(fs::u8path(in), items, warnings)) {
             std::fprintf(stderr, "%s: does not exist\n", in.c_str());
             return false;
@@ -134,43 +154,55 @@ Counts count(const pex::Script& s) {
     return c;
 }
 
+// Loads and parses one item; on failure prints the reason (under the lock).
+bool load_script(const pextool::Item& it, pextool::Loader& ld, pex::Script& s, std::mutex& mu,
+                 std::vector<uint8_t>* bytesOut = nullptr) {
+    std::vector<uint8_t> bytes;
+    std::string err;
+    pex::Status st = pex::Status::IoError;
+    if (ld.load(it, bytes, err)) st = pex::read(bytes.data(), bytes.size(), s, &err);
+    if (st != pex::Status::Ok) {
+        std::lock_guard<std::mutex> lk(mu);
+        std::fprintf(stderr, "%s: %s: %s\n", it.label.c_str(), pex::to_string(st), err.c_str());
+        return false;
+    }
+    if (bytesOut) *bytesOut = std::move(bytes);
+    return true;
+}
+
 // --- info -----------------------------------------------------------------
 
 int cmd_info(int argc, char** argv) {
-    Common c;
-    if (!parse_common(argc, argv, 2, c, "info")) return 2;
+    Options o;
+    if (!parse(argc, argv, 2, o, "info")) return 2;
     std::vector<pextool::Item> items;
-    if (!collect(c, items)) return 2;
+    if (!collect(o, items)) return 2;
 
     std::vector<std::string> lines(items.size());
     std::atomic<int> failures{0};
+    std::mutex mu;
     const bool single = items.size() == 1;
-    pextool::for_each_parallel(items, c.threads, [&](size_t i, const pextool::Item& it, pextool::Loader& ld) {
-        std::vector<uint8_t> bytes;
-        std::string err;
+    pextool::for_each_parallel(items, o.threads, [&](size_t i, const pextool::Item& it, pextool::Loader& ld) {
         pex::Script s;
-        pex::Status st = pex::Status::IoError;
-        if (ld.load(it, bytes, err)) st = pex::read(bytes.data(), bytes.size(), s, &err);
-        std::string& out = lines[i];
-        if (st != pex::Status::Ok) {
+        if (!load_script(it, ld, s, mu)) {
             ++failures;
-            out = it.label + ": " + pex::to_string(st) + ": " + err + "\n";
             return;
         }
         const Counts n = count(s);
         const pex::Header& h = s.header;
         char buf[512];
-        if (c.json) {
-            // One JSON object per line; a single input gives one object.
+        std::string& out = lines[i];
+        if (o.json) {
             std::snprintf(buf, sizeof buf,
                           "{\"file\":\"%s\",\"version\":\"%u.%u\",\"gameId\":%u,\"compileTime\":%llu,"
                           "\"source\":\"%s\",\"user\":\"%s\",\"computer\":\"%s\",\"debug\":%s,\"strings\":%zu,"
                           "\"objects\":%zu,\"variables\":%zu,\"properties\":%zu,\"states\":%zu,\"functions\":%zu,"
-                          "\"instructions\":%zu}\n",
+                          "\"instructions\":%zu,\"notes\":%zu}\n",
                           it.name.c_str(), unsigned(h.major), unsigned(h.minor), unsigned(h.gameId),
                           static_cast<unsigned long long>(h.compileTime), h.sourceName.c_str(), h.userName.c_str(),
                           h.computerName.c_str(), s.debug.present ? "true" : "false", s.strings.size(),
-                          s.objects.size(), n.variables, n.properties, n.states, n.functions, n.instructions);
+                          s.objects.size(), n.variables, n.properties, n.states, n.functions, n.instructions,
+                          s.notes.size());
             out = buf;
             return;
         }
@@ -189,11 +221,11 @@ int cmd_info(int argc, char** argv) {
             text += "\n";
             std::snprintf(buf, sizeof buf, "strings:      %zu\n", s.strings.size());
             text += buf;
-            for (const pex::Object& o : s.objects) {
-                text += "object:       " + std::string(s.str(o.name));
-                if (!s.str(o.parent).empty()) text += " extends " + std::string(s.str(o.parent));
+            for (const pex::Object& ob : s.objects) {
+                text += "object:       " + std::string(s.str(ob.name));
+                if (!s.str(ob.parent).empty()) text += " extends " + std::string(s.str(ob.parent));
                 text += "\n";
-                if (!s.str(o.autoState).empty()) text += "auto state:   " + std::string(s.str(o.autoState)) + "\n";
+                if (!s.str(ob.autoState).empty()) text += "auto state:   " + std::string(s.str(ob.autoState)) + "\n";
             }
             std::snprintf(buf, sizeof buf,
                           "variables:    %zu\nproperties:   %zu\nstates:       %zu\nfunctions:    %zu\n"
@@ -213,43 +245,36 @@ int cmd_info(int argc, char** argv) {
     return failures ? 1 : 0;
 }
 
-// --- json -----------------------------------------------------------------
+// --- json / asm (render a view per script) ----------------------------------
 
-int cmd_json(int argc, char** argv) {
-    Common c;
-    if (!parse_common(argc, argv, 2, c, "json")) return 2;
+int cmd_render(int argc, char** argv, const char* cmd, const char* ext,
+               std::string (*render)(const pex::Script&)) {
+    Options o;
+    if (!parse(argc, argv, 2, o, cmd)) return 2;
     std::vector<pextool::Item> items;
-    if (!collect(c, items)) return 2;
-    if (items.size() > 1 && c.out.empty()) {
-        std::fprintf(stderr, "json: %zu scripts; give --out <directory>\n", items.size());
+    if (!collect(o, items)) return 2;
+    if (items.size() > 1 && o.out.empty()) {
+        std::fprintf(stderr, "%s: %zu scripts; give --out <directory>\n", cmd, items.size());
         return 2;
     }
-    const bool toDir = items.size() > 1 || (!c.out.empty() && fs::is_directory(fs::u8path(c.out)));
-    if (toDir) {
-        std::error_code ec;
-        fs::create_directories(fs::u8path(c.out), ec);
-    }
+    std::error_code ec;
+    const bool toDir = items.size() > 1 || (!o.out.empty() && fs::is_directory(fs::u8path(o.out), ec));
+    if (toDir) fs::create_directories(fs::u8path(o.out), ec);
     std::mutex mu;
     std::atomic<int> failures{0};
-    pextool::for_each_parallel(items, c.threads, [&](size_t, const pextool::Item& it, pextool::Loader& ld) {
-        std::vector<uint8_t> bytes;
-        std::string err;
+    pextool::for_each_parallel(items, o.threads, [&](size_t, const pextool::Item& it, pextool::Loader& ld) {
         pex::Script s;
-        pex::Status st = pex::Status::IoError;
-        if (ld.load(it, bytes, err)) st = pex::read(bytes.data(), bytes.size(), s, &err);
-        if (st != pex::Status::Ok) {
+        if (!load_script(it, ld, s, mu)) {
             ++failures;
-            std::lock_guard<std::mutex> lk(mu);
-            std::fprintf(stderr, "%s: %s: %s\n", it.label.c_str(), pex::to_string(st), err.c_str());
             return;
         }
-        const std::string text = pex::to_json(s, true);
-        if (c.out.empty()) {
+        const std::string text = render(s);
+        if (o.out.empty()) {
             std::fwrite(text.data(), 1, text.size(), stdout);
             return;
         }
-        fs::path target = fs::u8path(c.out);
-        if (toDir) target /= fs::u8path(it.name).replace_extension(".json");
+        fs::path target = fs::u8path(o.out);
+        if (toDir) target /= fs::u8path(it.name).replace_extension(ext);
         std::ofstream f(target, std::ios::binary | std::ios::trunc);
         if (!f) {
             ++failures;
@@ -262,54 +287,175 @@ int cmd_json(int argc, char** argv) {
     return failures ? 1 : 0;
 }
 
+std::string render_json(const pex::Script& s) { return pex::to_json(s, true); }
+std::string render_asm(const pex::Script& s) { return pex::to_asm(s); }
+
 // --- check ----------------------------------------------------------------
 
-int cmd_check(int argc, char** argv) {
-    Common c;
-    bool rewrite = false;
-    for (int i = 2; i < argc; ++i) {
-        if (std::strcmp(argv[i], "--rewrite") == 0) rewrite = true;
+struct Tally {
+    std::mutex mu;
+    std::map<std::string, size_t> byCategory;
+    std::atomic<size_t> ok{0}, bad{0};
+    bool quiet = false;
+
+    void pass() { ++ok; }
+    void fail(const pextool::Item& it, const std::string& category, const std::string& detail) {
+        ++bad;
+        std::lock_guard<std::mutex> lk(mu);
+        ++byCategory[category];
+        if (!quiet) std::fprintf(stdout, "%s: %s: %s\n", it.label.c_str(), category.c_str(), detail.c_str());
     }
-    if (!parse_common(argc, argv, 2, c, "check")) return 2;
-    if (!rewrite) {
-        std::fprintf(stderr, "check: give --rewrite (pex help check)\n");
+    int finish(size_t total, double secs) {
+        for (const auto& [k, v] : byCategory) std::fprintf(stdout, "  %-24s %zu\n", k.c_str(), v);
+        std::fprintf(stdout, "files %zu  ok %zu  not-ok %zu  %.1fs\n", total, ok.load(), bad.load(), secs);
+        return bad ? 1 : 0;
+    }
+};
+
+std::string first_error_line(const std::string& output) {
+    size_t pos = 0;
+    while (pos < output.size()) {
+        size_t end = output.find('\n', pos);
+        if (end == std::string::npos) end = output.size();
+        std::string line = output.substr(pos, end - pos);
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+        if (line.find(": error") != std::string::npos || line.find(": fatal") != std::string::npos ||
+            line.find("Cannot") != std::string::npos) {
+            return line;
+        }
+        pos = end + 1;
+    }
+    return output.empty() ? "(no output)" : output.substr(0, 160);
+}
+
+std::string difference_text(const std::vector<pex::Difference>& diffs) {
+    if (diffs.empty()) return "differs";
+    const pex::Difference& d = diffs.front();
+    std::string s = std::string(pex::to_string(d.kind)) + " " + d.where + ": " + d.message;
+    if (diffs.size() > 1) s += " (+" + std::to_string(diffs.size() - 1) + " more)";
+    return s;
+}
+
+int check_rewrite(const Options& o, const std::vector<pextool::Item>& items) {
+    const auto t0 = std::chrono::steady_clock::now();
+    Tally tally;
+    tally.quiet = o.quiet;
+    pextool::for_each_parallel(items, o.threads, [&](size_t, const pextool::Item& it, pextool::Loader& ld) {
+        std::vector<uint8_t> bytes;
+        std::string err;
+        if (!ld.load(it, bytes, err)) {
+            tally.fail(it, "load failed", err);
+            return;
+        }
+        const pex::Status st = pex::rewrite_check(bytes.data(), bytes.size(), &err);
+        if (st == pex::Status::Ok) {
+            tally.pass();
+            return;
+        }
+        const bool differs = st == pex::Status::Corrupt && err.rfind("rewrite differs", 0) == 0;
+        tally.fail(it, differs ? "rewrite differs" : pex::to_string(st), err);
+    });
+    return tally.finish(items.size(), std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+}
+
+int check_asm(const Options& o, const std::vector<pextool::Item>& items) {
+    if (o.tools.empty()) {
+        std::fprintf(stderr, "check --asm needs --tools <Papyrus Compiler folder>\n");
+        return 2;
+    }
+    const fs::path assembler = fs::u8path(o.tools) / "PapyrusAssembler.exe";
+    std::error_code ec;
+    if (!fs::exists(assembler, ec)) {
+        std::fprintf(stderr, "%s not found\n", assembler.string().c_str());
+        return 2;
+    }
+    fs::path work = o.work.empty() ? fs::temp_directory_path(ec) / ("pex-check-" + std::to_string(::_getpid()))
+                                   : fs::u8path(o.work);
+    fs::create_directories(work, ec);
+    if (ec) {
+        std::fprintf(stderr, "cannot create %s\n", work.string().c_str());
+        return 2;
+    }
+
+    const auto t0 = std::chrono::steady_clock::now();
+    Tally tally;
+    tally.quiet = o.quiet;
+    std::mutex mu;
+    pextool::for_each_parallel(items, o.threads, [&](size_t i, const pextool::Item& it, pextool::Loader& ld) {
+        pex::Script original;
+        std::vector<uint8_t> bytes;
+        if (!load_script(it, ld, original, mu, &bytes)) {
+            tally.fail(it, "unreadable", "");
+            return;
+        }
+        if (original.objects.empty()) {
+            tally.fail(it, "no object", "");
+            return;
+        }
+        const std::string name = std::string(original.str(original.objects[0].name));
+        const fs::path dir = work / std::to_string(i);
+        std::error_code e2;
+        fs::create_directories(dir, e2);
+        const fs::path pas = dir / fs::u8path(name + ".pas");
+        {
+            const std::string text = pex::to_asm(original);
+            std::ofstream f(pas, std::ios::binary | std::ios::trunc);
+            f.write(text.data(), static_cast<std::streamsize>(text.size()));
+            if (!f) {
+                tally.fail(it, "cannot write listing", pas.string());
+                return;
+            }
+        }
+        // "Cannot open store" is the assembler failing to open a file that is
+        // there; it happens right after the file was written (antivirus
+        // scanning holds it) and passes on retry.
+        pextool::RunResult r;
+        for (int attempt = 0; attempt < 4; ++attempt) {
+            if (attempt) std::this_thread::sleep_for(std::chrono::milliseconds(100 * attempt));
+            r = pextool::run(assembler, {name, "-Q"}, dir);
+            if (!r.started || r.exitCode == 0 || r.output.find("Cannot open store") == std::string::npos) break;
+        }
+        if (!r.started) {
+            tally.fail(it, "assembler not started", assembler.string());
+            return;
+        }
+        const fs::path produced = dir / fs::u8path(name + ".pex");
+        if (r.exitCode != 0 || !fs::exists(produced, e2)) {
+            tally.fail(it, "assembler rejected", first_error_line(r.output));
+            return;
+        }
+        pex::Script assembled;
+        std::string err;
+        const pex::Status st = pex::read_file(produced, assembled, &err);
+        if (st != pex::Status::Ok) {
+            tally.fail(it, "assembler output unreadable", err);
+            return;
+        }
+        std::vector<pex::Difference> diffs;
+        if (!pex::canonical_equal(original, assembled, &diffs)) {
+            tally.fail(it, "model differs", difference_text(diffs));
+            return;
+        }
+        tally.pass();
+        if (!o.keep) fs::remove_all(dir, e2);
+    });
+    if (!o.keep) fs::remove_all(work, ec);
+    return tally.finish(items.size(), std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+}
+
+int cmd_check(int argc, char** argv) {
+    Options o;
+    if (!parse(argc, argv, 2, o, "check")) return 2;
+    if (o.rewrite == o.asmCheck) {
+        std::fprintf(stderr, "check: give exactly one of --rewrite, --asm (pex help)\n");
         return 2;
     }
     std::vector<pextool::Item> items;
-    if (!collect(c, items)) return 2;
-
-    const auto t0 = std::chrono::steady_clock::now();
-    std::mutex mu;
-    std::map<std::string, size_t> tally;
-    std::atomic<size_t> ok{0}, bad{0};
-    pextool::for_each_parallel(items, c.threads, [&](size_t, const pextool::Item& it, pextool::Loader& ld) {
-        std::vector<uint8_t> bytes;
-        std::string err;
-        std::string category;
-        if (!ld.load(it, bytes, err)) {
-            category = "load failed";
-        } else {
-            const pex::Status st = pex::rewrite_check(bytes.data(), bytes.size(), &err);
-            if (st == pex::Status::Ok) {
-                ++ok;
-                return;
-            }
-            category = st == pex::Status::Corrupt && err.rfind("rewrite differs", 0) == 0 ? "rewrite differs"
-                                                                                          : pex::to_string(st);
-        }
-        ++bad;
-        std::lock_guard<std::mutex> lk(mu);
-        ++tally[category];
-        if (!c.quiet) std::fprintf(stdout, "%s: %s: %s\n", it.label.c_str(), category.c_str(), err.c_str());
-    });
-    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    for (const auto& [k, v] : tally) std::fprintf(stdout, "  %-20s %zu\n", k.c_str(), v);
-    std::fprintf(stdout, "files %zu  ok %zu  not-ok %zu  %.1fs\n", items.size(), ok.load(), bad.load(), secs);
-    return bad ? 1 : 0;
+    if (!collect(o, items)) return 2;
+    return o.rewrite ? check_rewrite(o, items) : check_asm(o, items);
 }
 
-int help(const char* cmd) {
-    (void)cmd;
+int help() {
     std::fputs(kHelp, stdout);
     return 0;
 }
@@ -332,15 +478,16 @@ int wmain(int argc, wchar_t** wargv) {
 int main(int argc, char** argv_) {
     std::vector<char*> argv(argv_, argv_ + argc + 1);
 #endif
-    if (argc < 2) return help(nullptr), 2;
+    if (argc < 2) return help(), 2;
     const std::string cmd = argv[1];
-    if (cmd == "help" || cmd == "--help" || cmd == "-h" || cmd == "/?") return help(argc > 2 ? argv[2] : nullptr);
+    if (cmd == "help" || cmd == "--help" || cmd == "-h" || cmd == "/?") return help();
     if (cmd == "--version" || cmd == "-V") {
         std::printf("pex %s\n", pex::kVersion);
         return 0;
     }
     if (cmd == "info") return cmd_info(argc, argv.data());
-    if (cmd == "json") return cmd_json(argc, argv.data());
+    if (cmd == "json") return cmd_render(argc, argv.data(), "json", ".json", render_json);
+    if (cmd == "asm") return cmd_render(argc, argv.data(), "asm", ".pas", render_asm);
     if (cmd == "check") return cmd_check(argc, argv.data());
     std::fprintf(stderr, "unknown command %s (pex help)\n", cmd.c_str());
     return 2;

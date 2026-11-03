@@ -281,4 +281,8 @@ Status rewrite_check(const uint8_t* data, size_t size, std::string* error = null
 // JSON rendering of the whole model (strings resolved, bytecode as arrays).
 std::string to_json(const Script& script, bool pretty = true);
 
+// Papyrus assembly in the form PapyrusAssembler.exe reads (docs/ASM_SYNTAX.md).
+// Jump targets become labels; debug line numbers become ";@line N" comments.
+std::string to_asm(const Script& script);
+
 }  // namespace papyrus::pex
