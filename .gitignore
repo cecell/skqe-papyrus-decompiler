@@ -1,0 +1,7 @@
+build/
+build-fuzz/
+out/
+*.user
+.vs/
+POST_COMPACT_RESUME.md
+BACKLOG.md
