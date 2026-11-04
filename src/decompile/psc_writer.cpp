@@ -629,28 +629,33 @@ private:
             ctx.names[locals[li].name] = cand;
         }
 
-        // Insert, deepest lists first and descending indices within a list,
-        // so earlier insertions do not move later ones.
-        std::vector<size_t> order(locals.size());
-        for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+        // First turn first assignments into declarations (no indices move),
+        // then insert the bare declarations, deepest lists first and
+        // descending indices within a list, so earlier insertions do not
+        // move later ones.
+        for (size_t li = 0; li < locals.size(); ++li) {
+            Placement& pl = where[li];
+            if (!pl.initHere) continue;
+            Stmt& st = *(*pl.list)[pl.index];
+            st.kind = StmtKind::Decl;
+            st.declType = locals[li].type;
+            st.declName = names[li];
+            st.lhs.reset();
+        }
+        std::vector<size_t> order;
+        for (size_t i = 0; i < locals.size(); ++i) {
+            if (!where[i].initHere) order.push_back(i);
+        }
         std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
             if (where[a].list != where[b].list) return where[a].list > where[b].list;
             return where[a].index > where[b].index;
         });
         for (size_t li : order) {
             Placement& pl = where[li];
-            if (pl.initHere) {
-                Stmt& st = *(*pl.list)[pl.index];
-                st.kind = StmtKind::Decl;
-                st.declType = locals[li].type;
-                st.declName = names[li];
-                st.lhs.reset();
-            } else {
-                auto d = std::make_unique<Stmt>(StmtKind::Decl);
-                d->declType = locals[li].type;
-                d->declName = names[li];
-                pl.list->insert(pl.list->begin() + static_cast<long long>(std::min(pl.index, pl.list->size())), std::move(d));
-            }
+            auto d = std::make_unique<Stmt>(StmtKind::Decl);
+            d->declType = locals[li].type;
+            d->declName = names[li];
+            pl.list->insert(pl.list->begin() + static_cast<long long>(std::min(pl.index, pl.list->size())), std::move(d));
         }
         std::vector<StmtPtr> out;
         for (StmtPtr& st : stmts) out.push_back(std::move(st));
@@ -717,8 +722,10 @@ private:
             line(depth, "If " + expr(*st.rhs, 0, false, Context::Condition, ctx) + line_comment(st, ctx));
             for (const StmtPtr& s : st.body) statement(*s, depth + 1, ctx);
             const Stmt* cur = &st;
-            while (cur->elseBody.size() == 1 && cur->elseBody[0]->kind == StmtKind::If &&
-                   else_if_collapsible(*cur, *cur->elseBody[0], ctx)) {
+            // ElseIf and a nested If differ only in temp allocation, which no
+            // rule derived so far reproduces (docs/COMPILER_PATTERNS.md); ElseIf
+            // is the reading that matches most vanilla sources.
+            while (cur->elseBody.size() == 1 && cur->elseBody[0]->kind == StmtKind::If) {
                 cur = cur->elseBody[0].get();
                 line(depth, "ElseIf " + expr(*cur->rhs, 0, false, Context::Condition, ctx) + line_comment(*cur, ctx));
                 for (const StmtPtr& s : cur->body) statement(*s, depth + 1, ctx);
@@ -746,7 +753,7 @@ private:
     // either reading compiles the same and ElseIf is kept unless a bool temp
     // with a higher number than the held one was allocated inside, which only
     // a held temp explains.
-    static bool else_if_collapsible(const Stmt& outer, const Stmt& inner, const Ctx& ctx) {
+    [[maybe_unused]] static bool else_if_collapsible(const Stmt& outer, const Stmt& inner, const Ctx& ctx) {
         if (outer.condTemp == 0) return true;
         const Function& f = ctx.c->f;
         if (inner.ipEnd > f.code.size() || inner.ip >= inner.ipEnd) return true;
@@ -835,6 +842,9 @@ private:
             const std::string from = lower(k.type);
             if (k.kind == ExprKind::Lit && k.lit.type == ValueType::None) return "None";
             if (k.kind == ExprKind::Var && ctx.c->is_nonevar(k.name)) return "None";  // a read of the None slot
+            // A call that returns nothing used as a value: the compiler casts
+            // the None result itself (still accepted today).
+            if (from == "none" && context == Context::Value) return expr(k, parentPrec, rightOperand, Context::Value, ctx);
             if (e.implicitCast) return expr(k, parentPrec, rightOperand, Context::Value, ctx);
             // A same-type cast is never inserted by the compiler (the && / ||
             // ones were removed earlier), so it was written and must stay.
