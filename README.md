@@ -25,7 +25,8 @@ script on a modded machine, and the numbers are in the docs. What it does:
    a function that does not is emitted as a stub with its assembly, never
    taking the file with it. The score that matters is the round trip:
    decompile, compile with `PapyrusCompiler.exe`, compare with the original
-   at model level (docs/ROUNDTRIP.md).
+   at model level: **13,986 of the 14,026 vanilla scripts (99.71%) come back
+   identical** (docs/ROUNDTRIP.md explains the 40).
 4. **The analyses the ESL-compaction tooling needs**, with no compiler
    involved: `refs` lists every FormID literal paired with its plugin name,
    `patch --map` renumbers them in the compiled file, `closure` tells whether
