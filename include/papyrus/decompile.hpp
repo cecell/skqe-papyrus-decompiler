@@ -55,13 +55,15 @@ struct DecompileOptions {
     bool keepGeneratedFunctions = false;
     // Append " ; #line N" comments from the debug info to statements.
     bool lineComments = false;
-    // Declare every object- and array-typed parameter with "= None". Compiled
-    // files do not store parameter defaults, and a call that omitted such a
-    // parameter is decompiled without it, so a set of decompiled scripts
-    // only compiles against itself when the declarations allow omission.
-    // Changes nothing in the declaring script's compiled form. Used for
-    // import copies (the round-trip check, the closure command), not for
-    // output meant to be read.
+    // Declare every parameter with a default ("= None" for objects and
+    // arrays, 0 / 0.0 / False / "" for the value types). Compiled files do
+    // not store parameter defaults, and a call that omitted an object
+    // argument is decompiled without it, so a set of decompiled scripts only
+    // compiles against itself when the declarations allow omission; the
+    // value-type defaults let a script built against another version of its
+    // callee (one with fewer parameters) still compile. Changes nothing in
+    // the declaring script's compiled form. Used for import copies (the
+    // round-trip check, the closure command), not for output meant to be read.
     bool optionalObjectParams = false;
     // Write every function and accessor with an empty body: a declaration
     // stub that a compiler can import (parent, properties, variables,

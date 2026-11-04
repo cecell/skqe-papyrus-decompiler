@@ -88,7 +88,10 @@ struct MissingMember {
     std::string script;      // the script whose code calls it
     std::string type;        // the static type of the object / class
     std::string member;      // function or property name
-    std::string reason;      // "no such function in the chain", "chain incomplete at X"
+    std::string reason;      // "no such function in the chain"; or the declaration exists but the
+                             // call does not fit it: "called with N arguments, declared with M",
+                             // "result assigned to a int, declared without a return value",
+                             // "property is a X, read into a Y" (built against another version)
 };
 
 struct Closure {

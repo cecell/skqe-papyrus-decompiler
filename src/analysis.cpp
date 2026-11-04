@@ -522,6 +522,9 @@ Closure compute_closure(const Script& s, ScriptResolver& resolver,
             // Walk the chain.
             bool complete = true, found = false;
             std::string cur = type;
+            const Script* declScript = nullptr;
+            const Function* declFn = nullptr;
+            const Property* declProp = nullptr;
             for (int guard = 0; guard < 32 && !cur.empty() && !found; ++guard) {
                 const Script* ps = cur == root ? &s : resolver.find(cur);
                 if (!ps || ps->objects.empty()) {
@@ -530,23 +533,74 @@ Closure compute_closure(const Script& s, ScriptResolver& resolver,
                 }
                 const Object& po = ps->objects[0];
                 if (property) {
-                    for (const Property& p : po.properties) found = found || lower(ps->str(p.name)) == lower(member);
+                    for (const Property& p : po.properties) {
+                        if (!found && lower(ps->str(p.name)) == lower(member)) {
+                            found = true;
+                            declScript = ps;
+                            declProp = &p;
+                        }
+                    }
                 } else {
                     for (const State& st : po.states) {
-                        for (const NamedFunction& nf : st.functions) found = found || lower(ps->str(nf.name)) == lower(member);
+                        for (const NamedFunction& nf : st.functions) {
+                            if (!found && lower(ps->str(nf.name)) == lower(member)) {
+                                found = true;
+                                declScript = ps;
+                                declFn = &nf.body;
+                            }
+                        }
                     }
                 }
                 cur = lower(ps->str(po.parent));
             }
-            if (found) continue;
-            reported.insert(key);
-            MissingMember m;
-            m.script = std::string(s.str(o.name));
-            m.type = type;
-            m.member = member;
-            m.reason = complete ? (property ? "no such property in the chain" : "no such function in the chain")
-                                : "chain incomplete (a parent is not available as a compiled script)";
-            if (complete) c.missingMembers.push_back(std::move(m));
+            auto report = [&](const std::string& k, std::string reason) {
+                reported.insert(k);
+                MissingMember m;
+                m.script = std::string(s.str(o.name));
+                m.type = type;
+                m.member = member;
+                m.reason = std::move(reason);
+                c.missingMembers.push_back(std::move(m));
+            };
+            if (!found) {
+                reported.insert(key);
+                if (complete) report(key, property ? "no such property in the chain" : "no such function in the chain");
+                continue;
+            }
+            // The declaration exists; does the call fit it? The compiler
+            // always writes a call's result into a slot of the declared
+            // return type (a cast follows when the source wanted another),
+            // and never passes more arguments than the declaration has
+            // parameters. Fewer is legal (defaults are not in the file).
+            // A mismatch means the script was built against another
+            // version of the callee: the compile fails in the import.
+            auto dest_type = [&](size_t idx) -> std::string {
+                if (idx >= ins.args.size() || ins.args[idx].type != ValueType::Identifier) return "";
+                const std::string n = lower(s.str(ins.args[idx].str()));
+                if (n == "::nonevar") return "";  // result discarded: anything goes
+                auto it2 = tt.byName.find(n);
+                return it2 == tt.byName.end() ? "" : it2->second;
+            };
+            if (declFn) {
+                const size_t fixed = ins.op == Opcode::CallParent ? 2 : 3;
+                const size_t passed = ins.args.size() > fixed ? ins.args.size() - fixed : 0;
+                if (passed > declFn->params.size() && !reported.count(key + "#arity")) {
+                    report(key + "#arity", "called with " + std::to_string(passed) + " arguments, declared with " +
+                                               std::to_string(declFn->params.size()));
+                }
+                const std::string dest = dest_type(ins.op == Opcode::CallParent ? 1 : 2);
+                const std::string ret = lower(declScript->str(declFn->returnType));
+                if (!dest.empty() && dest != ret && !reported.count(key + "#return")) {
+                    report(key + "#return", ret == "none" ? "result assigned to a " + dest + ", declared without a return value"
+                                                          : "result assigned to a " + dest + ", declared to return " + ret);
+                }
+            } else if (declProp && ins.op == Opcode::PropGet) {
+                const std::string dest = dest_type(2);
+                const std::string pt = lower(declScript->str(declProp->type));
+                if (!dest.empty() && dest != pt && !reported.count(key + "#type")) {
+                    report(key + "#type", "property is a " + pt + ", read into a " + dest);
+                }
+            }
         }
     });
     return c;

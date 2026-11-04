@@ -357,9 +357,13 @@ private:
 
     bool is_event(const Function& f, const std::string& name) const {
         if (f.is_global() || f.is_native()) return false;
+        // An event never returns a value: a function that does is a function
+        // whatever its name (UIExtensions' OpenMenu, another mod's Register share
+        // names with events of other scripts).
+        if (lower(m_s.str(f.returnType)) != "none") return false;
         const std::string n = lower(name);
         if (is_known_event(n)) return true;
-        return lower(m_s.str(f.returnType)) == "none" && starts_with_ci(n, "on");
+        return starts_with_ci(n, "on");
     }
 
     void function(const Object& o, const State& st, const NamedFunction& nf, int depth) {
@@ -377,8 +381,16 @@ private:
             if (i) head += ", ";
             head += nice_type(f.params[i].type) + " " + str(f.params[i].name);
             if (m_opt.optionalObjectParams) {
+                // Defaults are not in the compiled file and change nothing in
+                // it; declaring one for every parameter lets any call that
+                // omitted an argument compile (the default itself never
+                // matters: the compiler wrote the omitted value into the call).
                 const std::string t = lower(m_s.str(f.params[i].type));
-                if (t != "int" && t != "float" && t != "bool" && t != "string") head += " = None";
+                if (t == "int") head += " = 0";
+                else if (t == "float") head += " = 0.0";
+                else if (t == "bool") head += " = False";
+                else if (t == "string") head += " = \"\"";
+                else head += " = None";
             }
         }
         head += ")";
