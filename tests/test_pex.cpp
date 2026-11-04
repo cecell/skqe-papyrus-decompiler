@@ -870,6 +870,82 @@ static void test_assemble() {
     }
 }
 
+// --- ElseIf against a nested If, from the temps (docs/COMPILER_PATTERNS.md) ---
+
+// A listing with Probe02's Chain (an ElseIf chain) and Nested (the same
+// written as nested Else / If), as the compiler emitted them.
+static const char* kElseIfListing =
+    ".info\n  .source \"P.psc\"\n  .modifyTime 1\n  .compileTime 2\n  .user \"u\"\n  .computer \"c\"\n.endInfo\n"
+    ".userFlagsRef\n.endUserFlagsRef\n"
+    ".objectTable\n  .object P ObjectReference\n    .userFlags 0\n    .docString \"\"\n    .autoState\n"
+    "    .variableTable\n    .endVariableTable\n    .propertyTable\n    .endPropertyTable\n"
+    "    .stateTable\n      .state\n"
+    "        .function Chain\n          .userFlags 0\n          .docString \"\"\n          .return None\n"
+    "          .paramTable\n            .param a Int\n            .param b Int\n            .param c Int\n          .endParamTable\n"
+    "          .localTable\n            .local ::temp3 bool\n            .local ::temp4 bool\n            .local ::nonevar none\n"
+    "            .local bx Bool\n            .local ::temp5 bool\n            .local by Bool\n            .local by2 Bool\n"
+    "            .local bz Bool\n            .local bw Bool\n            .local bw2 Bool\n          .endLocalTable\n"
+    "          .code\n"
+    "            COMPAREEQ ::temp3 a b ;@line 27\n            JUMPF ::temp3 label3 ;@line 27\n"
+    "            COMPAREEQ ::temp4 c a ;@line 28\n            ASSIGN bx ::temp4 ;@line 28\n"
+    "            CALLMETHOD Take self ::nonevar 1 1 1 ;@line 29\n            JUMP label0\n            label3:\n"
+    "            COMPAREEQ ::temp4 a c ;@line 30\n            JUMPF ::temp4 label1 ;@line 30\n"
+    "            COMPAREEQ ::temp5 b c ;@line 31\n            ASSIGN by ::temp5 ;@line 31\n"
+    "            CALLMETHOD Take self ::nonevar 2 2 2 ;@line 32\n            JUMP label0\n            label1:\n"
+    "            COMPAREEQ ::temp5 b c ;@line 33\n            JUMPF ::temp5 label2 ;@line 33\n"
+    "            COMPAREEQ ::temp4 a 1 ;@line 34\n            ASSIGN by2 ::temp4 ;@line 34\n"
+    "            CALLMETHOD Take self ::nonevar 3 3 3 ;@line 35\n            JUMP label0\n            label2:\n"
+    "            COMPAREEQ ::temp4 a 2 ;@line 37\n            ASSIGN bz ::temp4 ;@line 37\n"
+    "            CALLMETHOD Take self ::nonevar 4 4 4 ;@line 38\n            label0:\n"
+    "            COMPAREEQ ::temp5 a 3 ;@line 40\n            ASSIGN bw ::temp5 ;@line 40\n"
+    "            COMPAREEQ ::temp4 a 4 ;@line 41\n            ASSIGN bw2 ::temp4 ;@line 41\n"
+    "          .endCode\n        .endFunction\n"
+    "        .function Nested\n          .userFlags 0\n          .docString \"\"\n          .return None\n"
+    "          .paramTable\n            .param a Int\n            .param b Int\n            .param c Int\n          .endParamTable\n"
+    "          .localTable\n            .local ::temp6 bool\n            .local ::temp7 bool\n            .local ::nonevar none\n"
+    "            .local bx Bool\n            .local ::temp8 bool\n            .local by Bool\n            .local ::temp9 bool\n"
+    "            .local by2 Bool\n            .local bz Bool\n            .local bw Bool\n            .local bw2 Bool\n          .endLocalTable\n"
+    "          .code\n"
+    "            COMPAREEQ ::temp6 a b ;@line 46\n            JUMPF ::temp6 label9 ;@line 46\n"
+    "            COMPAREEQ ::temp7 c a ;@line 47\n            ASSIGN bx ::temp7 ;@line 47\n"
+    "            CALLMETHOD Take self ::nonevar 1 1 1 ;@line 48\n            JUMP label4\n            label9:\n"
+    "            COMPAREEQ ::temp7 a c ;@line 50\n            JUMPF ::temp7 label8 ;@line 50\n"
+    "            COMPAREEQ ::temp8 b c ;@line 51\n            ASSIGN by ::temp8 ;@line 51\n"
+    "            CALLMETHOD Take self ::nonevar 2 2 2 ;@line 52\n            JUMP label5\n            label8:\n"
+    "            COMPAREEQ ::temp8 b c ;@line 54\n            JUMPF ::temp8 label7 ;@line 54\n"
+    "            COMPAREEQ ::temp9 a 1 ;@line 55\n            ASSIGN by2 ::temp9 ;@line 55\n"
+    "            CALLMETHOD Take self ::nonevar 3 3 3 ;@line 56\n            JUMP label6\n            label7:\n"
+    "            COMPAREEQ ::temp9 a 2 ;@line 58\n            ASSIGN bz ::temp9 ;@line 58\n"
+    "            CALLMETHOD Take self ::nonevar 4 4 4 ;@line 59\n            label6:\n            label5:\n            label4:\n"
+    "            COMPAREEQ ::temp9 a 3 ;@line 63\n            ASSIGN bw ::temp9 ;@line 63\n"
+    "            COMPAREEQ ::temp8 a 4 ;@line 64\n            ASSIGN bw2 ::temp8 ;@line 64\n"
+    "          .endCode\n        .endFunction\n"
+    "      .endState\n    .endStateTable\n  .endObject\n.endObjectTable\n";
+
+static void test_elseif_rule() {
+    Script s;
+    std::string err;
+    CHECK_STATUS(assemble(kElseIfListing, s, &err), Status::Ok);
+    const DecompileResult r = decompile(s);
+    CHECK(r.all_ok());
+    const std::string& src = r.source;
+    const size_t chain = src.find("Function Chain(");
+    const size_t nested = src.find("Function Nested(");
+    CHECK(chain != std::string::npos && nested != std::string::npos && chain < nested);
+    if (chain == std::string::npos || nested == std::string::npos) return;
+    const std::string chainText = src.substr(chain, nested - chain);
+    const std::string nestedText = src.substr(nested);
+    // Chain: the ElseIf temps were reused, so the chain comes back flat.
+    CHECK(chainText.find("    ElseIf a == c\n") != std::string::npos);
+    CHECK(chainText.find("    ElseIf b == c\n") != std::string::npos);
+    CHECK(chainText.find("        If a == c\n") == std::string::npos);
+    // Nested: each inner If allocated a fresh temp while its outer's was
+    // held, so the else parts stay nested.
+    CHECK(nestedText.find("    Else\n        If a == c\n") != std::string::npos);
+    CHECK(nestedText.find("        Else\n            If b == c\n") != std::string::npos);
+    CHECK(nestedText.find("ElseIf") == std::string::npos);
+}
+
 static void write_seeds(const fs::path& dir) {
     std::error_code ec;
     fs::create_directories(dir, ec);
@@ -898,6 +974,7 @@ int main(int argc, char** argv) {
     test_decompile();
     test_refs_and_patch();
     test_assemble();
+    test_elseif_rule();
     if (g_failures) {
         std::fprintf(stderr, "%d failure(s)\n", g_failures);
         return 1;

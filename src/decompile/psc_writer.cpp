@@ -619,6 +619,22 @@ private:
             }
         }
 
+        // A declaration placed in an else part that holds one If would turn
+        // `ElseIf` into `Else` + `If`; put it before the outer If instead
+        // (where a declaration stands changes nothing in the compiled code).
+        for (Placement& pl : where) {
+            for (;;) {
+                if (pl.list->size() != 1 || (*pl.list)[0]->kind != StmtKind::If) break;
+                std::vector<StmtPtr>* parent = nullptr;
+                size_t at = 0;
+                if (!find_else_parent(stmts, *pl.list, parent, at)) break;
+                pl.list = parent;
+                pl.index = at;
+                pl.initHere = false;
+                if (pl.depth) --pl.depth;
+            }
+        }
+
         // Display names: equal names are fine only in disjoint scopes.
         std::set<std::string> used;
         for (const Param& p : c.f.params) used.insert(lower(m_s.str(p.name)));
@@ -676,6 +692,21 @@ private:
         std::vector<StmtPtr> out;
         for (StmtPtr& st : stmts) out.push_back(std::move(st));
         return out;
+    }
+
+    // Finds the If statement whose else part is `list`: its list and index.
+    static bool find_else_parent(std::vector<StmtPtr>& outer, std::vector<StmtPtr>& list, std::vector<StmtPtr>*& parent,
+                                 size_t& at) {
+        for (size_t i = 0; i < outer.size(); ++i) {
+            Stmt& st = *outer[i];
+            if (&st.elseBody == &list) {
+                parent = &outer;
+                at = i;
+                return true;
+            }
+            if (find_else_parent(st.body, list, parent, at) || find_else_parent(st.elseBody, list, parent, at)) return true;
+        }
+        return false;
     }
 
     // True when `inner` is a statement list nested somewhere inside `outer`.
@@ -743,10 +774,10 @@ private:
             line(depth, "If " + expr(*st.rhs, 0, false, Context::Condition, ctx) + line_comment(st, ctx));
             for (const StmtPtr& s : st.body) statement(*s, depth + 1, ctx);
             const Stmt* cur = &st;
-            // ElseIf and a nested If differ only in temp allocation, which no
-            // rule derived so far reproduces (docs/COMPILER_PATTERNS.md); ElseIf
-            // is the reading that matches most vanilla sources.
-            while (cur->elseBody.size() == 1 && cur->elseBody[0]->kind == StmtKind::If) {
+            // ElseIf and a nested If differ only in temp allocation
+            // (else_if_collapsible below, docs/COMPILER_PATTERNS.md "Temps").
+            while (cur->elseBody.size() == 1 && cur->elseBody[0]->kind == StmtKind::If &&
+                   else_if_collapsible(*cur->elseBody[0], ctx)) {
                 cur = cur->elseBody[0].get();
                 line(depth, "ElseIf " + expr(*cur->rhs, 0, false, Context::Condition, ctx) + line_comment(*cur, ctx));
                 for (const StmtPtr& s : cur->body) statement(*s, depth + 1, ctx);
@@ -766,50 +797,123 @@ private:
         }
     }
 
+    // The temp an instruction writes, or 0 (see analysis.cpp dest_operand).
+    static StrIdx written_temp(const Instruction& ins, const Ctx& ctx) {
+        int d = -1;
+        switch (ins.op) {
+        case Opcode::CallMethod: case Opcode::CallStatic: case Opcode::PropGet: d = 2; break;
+        case Opcode::CallParent: case Opcode::ArrayFindElement: case Opcode::ArrayRFindElement: d = 1; break;
+        case Opcode::Jmp: case Opcode::JmpT: case Opcode::JmpF: case Opcode::Return: case Opcode::PropSet:
+        case Opcode::ArraySetElement: case Opcode::Nop: d = -1; break;
+        default: d = 0; break;
+        }
+        if (d < 0 || size_t(d) >= ins.args.size() || ins.args[d].type != ValueType::Identifier) return 0;
+        const StrIdx dest = ins.args[d].str();
+        return ctx.c->is_temp(dest) ? dest : 0;
+    }
+
     // ElseIf or a nested If inside Else? The compiled code is the same except
-    // for temp allocation: with ElseIf the outer condition's temp is freed
-    // before the inner condition is evaluated, with a nested If it stays held
-    // until the inner EndIf. So when the outer condition's temp is assigned
-    // anywhere inside the inner If, the source said ElseIf; when it never is,
-    // either reading compiles the same and ElseIf is kept unless a bool temp
-    // with a higher number than the held one was allocated inside, which only
-    // a held temp explains.
-    [[maybe_unused]] static bool else_if_collapsible(const Stmt& outer, const Stmt& inner, const Ctx& ctx) {
-        if (outer.condTemp == 0) return true;
-        const Function& f = ctx.c->f;
-        if (inner.ipEnd > f.code.size() || inner.ip >= inner.ipEnd) return true;
-        const std::string outerType = ctx.c->type_of(outer.condTemp);
-        const std::string_view outerName = ctx.c->s.str(outer.condTemp);
-        long long outerNum = -1;
-        if (outerName.size() > 6) outerNum = std::atoll(std::string(outerName.substr(6)).c_str());
-        // The inner condition's instructions end where its first body statement
-        // starts; deeper nested statements hold temps of their own and say
-        // nothing about this pair.
-        size_t condEnd = inner.ipEnd;
-        for (const StmtPtr& s : inner.body) condEnd = std::min(condEnd, s->ip);
-        for (const StmtPtr& s : inner.elseBody) condEnd = std::min(condEnd, s->ip);
-        bool higherAllocated = false;
-        for (size_t ip = inner.ip; ip < inner.ipEnd; ++ip) {
-            const Instruction& ins = f.code[ip];
-            // Destination operand positions (see analysis.cpp dest_operand).
-            int d = -1;
-            switch (ins.op) {
-            case Opcode::CallMethod: case Opcode::CallStatic: case Opcode::PropGet: d = 2; break;
-            case Opcode::CallParent: case Opcode::ArrayFindElement: case Opcode::ArrayRFindElement: d = 1; break;
-            case Opcode::Jmp: case Opcode::JmpT: case Opcode::JmpF: case Opcode::Return: case Opcode::PropSet:
-            case Opcode::ArraySetElement: case Opcode::Nop: d = -1; break;
-            default: d = 0; break;
+    // for temp allocation (docs/COMPILER_PATTERNS.md, "Temps"; probes/Probe02):
+    // the allocator keeps one FIFO free list per type; an ElseIf's condition
+    // temp is released at the end of its own branch, a nested If's is held
+    // until its EndIf. So, for the inner If with condition temp T:
+    //  - T allocated again inside its else part: it was free, so ElseIf;
+    //  - a temp of T's type allocated fresh there (a number above every temp
+    //    met so far): the free list was empty, so T was held, so nested;
+    //  - otherwise the two readings differ only in where T sits in the free
+    //    list: under ElseIf it is ahead of every temp of its type the else
+    //    part releases, so none of those can be allocated again (in the else
+    //    part or after the EndIf) before T is; a second allocation of one of
+    //    them, or one of them allocated after the EndIf before T, means
+    //    nested. Nothing of the kind means the readings compile the same,
+    //    and ElseIf is kept.
+    // A write into a live && / || accumulator (`CAST acc x` after a jump on
+    // acc to the next instruction) is not an allocation and is skipped.
+    static bool is_accumulator_write(const Function& f, size_t ip) {
+        const Instruction& ins = f.code[ip];
+        if (ins.op != Opcode::Cast || ins.args.size() != 2 || ins.args[0].type != ValueType::Identifier) return false;
+        const StrIdx acc = ins.args[0].str();
+        if (ins.args[1].type == ValueType::Identifier && ins.args[1].str() == acc) return false;
+        for (size_t q = ip; q-- > 0;) {
+            const Instruction& j = f.code[q];
+            const bool jump = j.op == Opcode::JmpT || j.op == Opcode::JmpF;
+            if (jump && j.args.size() == 2 && j.args[0].type == ValueType::Identifier && j.args[0].str() == acc &&
+                j.args[1].type == ValueType::Integer && static_cast<long long>(q) + j.args[1].as_int() == static_cast<long long>(ip) + 1) {
+                return true;
             }
-            if (d < 0 || size_t(d) >= ins.args.size() || ins.args[d].type != ValueType::Identifier) continue;
-            const StrIdx dest = ins.args[d].str();
-            if (dest == outer.condTemp) return true;  // reused: it was free: ElseIf
-            if (ip < condEnd && ctx.c->is_temp(dest) && ctx.c->type_of(dest) == outerType) {
-                const std::string_view n = ctx.c->s.str(dest);
-                const long long num = n.size() > 6 ? std::atoll(std::string(n.substr(6)).c_str()) : -1;
-                if (num > outerNum) higherAllocated = true;
+            if (!jump && j.args.size() > 0 && j.args[0].type == ValueType::Identifier && j.args[0].str() == acc &&
+                j.op != Opcode::Return) {
+                return false;  // acc written in between: a new value
             }
         }
-        return !higherAllocated;
+        return false;
+    }
+
+    // The `CAST acc x` that starts an && / || chain (followed by the jump on
+    // acc): the accumulator does not come from the free list in FIFO order
+    // (docs/COMPILER_PATTERNS.md, "Temps": not settled), so its freshness and
+    // its repeats say nothing about what was free.
+    static bool is_accumulator_alloc(const Function& f, size_t ip) {
+        const Instruction& ins = f.code[ip];
+        if (ins.op != Opcode::Cast || ins.args.size() != 2 || ins.args[0].type != ValueType::Identifier) return false;
+        if (ip + 1 >= f.code.size()) return false;
+        const Instruction& next = f.code[ip + 1];
+        return (next.op == Opcode::JmpT || next.op == Opcode::JmpF) && next.args.size() == 2 &&
+               next.args[0].type == ValueType::Identifier && next.args[0].str() == ins.args[0].str();
+    }
+
+    static bool else_if_collapsible(const Stmt& inner, const Ctx& ctx) {
+        if (inner.condTemp == 0 || inner.elseBody.empty()) return true;
+        const Function& f = ctx.c->f;
+        if (inner.ipEnd > f.code.size()) return true;
+        // The else part starts after the then-branch's jump to the end label
+        // (a statement's own ip can sit after a folded temp's write).
+        size_t elseStart = inner.elseBody.front()->ip;
+        for (size_t ip = inner.ip; ip < inner.ipEnd; ++ip) {
+            const Instruction& ins = f.code[ip];
+            if (ins.op == Opcode::Jmp && !ins.args.empty() && ins.args[0].type == ValueType::Integer &&
+                static_cast<long long>(ip) + ins.args[0].as_int() == static_cast<long long>(inner.ipEnd)) {
+                elseStart = ip + 1;
+                break;
+            }
+        }
+        if (elseStart >= inner.ipEnd) return true;
+        const std::string type = ctx.c->type_of(inner.condTemp);
+        auto temp_number = [&](StrIdx name) -> long long {
+            const std::string_view n = ctx.c->s.str(name);
+            return n.size() > 6 ? std::atoll(std::string(n.substr(6)).c_str()) : -1;
+        };
+        long long maxSeen = -1;
+        for (size_t ip = 0; ip < elseStart; ++ip) {
+            for (const Value& v : f.code[ip].args) {
+                if (v.type == ValueType::Identifier && ctx.c->is_temp(v.str())) maxSeen = std::max(maxSeen, temp_number(v.str()));
+            }
+        }
+        std::vector<StrIdx> released;  // temps of T's type the else part allocated (and so released)
+        for (size_t ip = elseStart; ip < inner.ipEnd; ++ip) {
+            const Instruction& ins = f.code[ip];
+            const StrIdx dest = written_temp(ins, ctx);
+            if (dest == inner.condTemp) return true;
+            if (dest && ctx.c->type_of(dest) == type && !is_accumulator_write(f, ip)) {
+                const bool fifo = !is_accumulator_alloc(f, ip);
+                if (fifo && temp_number(dest) > maxSeen) return false;
+                if (fifo && std::find(released.begin(), released.end(), dest) != released.end()) return false;
+                if (std::find(released.begin(), released.end(), dest) == released.end()) released.push_back(dest);
+            }
+            for (const Value& v : ins.args) {
+                if (v.type == ValueType::Identifier && ctx.c->is_temp(v.str())) maxSeen = std::max(maxSeen, temp_number(v.str()));
+            }
+        }
+        if (released.empty()) return true;
+        for (size_t ip = inner.ipEnd; ip < f.code.size(); ++ip) {
+            const StrIdx dest = written_temp(f.code[ip], ctx);
+            if (dest == inner.condTemp) return true;
+            if (dest && std::find(released.begin(), released.end(), dest) != released.end() && !is_accumulator_write(f, ip) &&
+                !is_accumulator_alloc(f, ip)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     // --- expressions ----------------------------------------------------------------
