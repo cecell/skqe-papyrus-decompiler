@@ -26,7 +26,9 @@ script on a modded machine, and the numbers are in the docs. What it does:
    taking the file with it. The score that matters is the round trip:
    decompile, compile with `PapyrusCompiler.exe`, compare with the original
    at model level: **13,986 of the 14,026 vanilla scripts (99.71%) come back
-   identical** (docs/ROUNDTRIP.md explains the 40).
+   identical**, and over the whole modded folder **75,101 of 76,592 (98.05%;
+   99.0% of those whose dependencies exist at all)**; docs/ROUNDTRIP.md
+   explains every class of the rest.
 4. **The analyses the ESL-compaction tooling needs**, with no compiler
    involved: `refs` lists every FormID literal paired with its plugin name,
    `patch --map` renumbers them in the compiled file, `closure` tells whether
@@ -83,6 +85,7 @@ pex patch <input> --map <FormIDMap> [--dry-run] [--backup]
 pex check --rewrite <input>      read + write, compare byte for byte
 pex check --asm <input> --tools "<game>\Papyrus Compiler"
 pex check --roundtrip <input> --tools "<game>\Papyrus Compiler" [--resolve <Data>]
+                                 [--per-script-imports]   (mixed sets: mods)
 ```
 
 `<input>` is a `.pex`, a directory (every `.pex` below it, loose and inside
@@ -93,9 +96,11 @@ Speed (modded Data folder, 77,000 scripts, 32 threads, 2026-11-03): parsing
 everything for `refs` 3.4 s; byte-exact rewrite check 1.3 s; decompiling the
 14,026 vanilla scripts to files 6.8 s, of which the decompiler itself is about
 one millisecond per script single-threaded and the rest is creating 14,000
-files (writing the same files as assembly takes 7.5 s). The checks that run
-Bethesda's compiler take minutes because each script is a separate compiler
-run; nothing in the normal workflow calls a compiler.
+files (writing the same files as assembly takes 7.5 s); the dependency
+closure of all 77,000 scripts (`closure`) 60 s single-threaded. The checks
+that run Bethesda's compiler take long because each script is a separate
+compiler run (the whole folder: 69 minutes, of which decompiling is 2);
+nothing in the normal workflow calls a compiler.
 
 ## Format notes that matter
 
