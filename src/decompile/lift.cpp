@@ -499,6 +499,9 @@ private:
             if (!d.defines_temp(m_c.s)) break;
             const StrIdx t = d.temp();
             if (reads_in_stmt(st, t) != 1) break;
+            // "::NoneVar = f(); RETURN ::NoneVar" is a call statement before
+            // the function's final Return, not "Return f()".
+            if (st.kind == StmtKind::Return && m_c.is_nonevar(t)) break;
             replace_in_stmt(st, t, d.rhs);
             out.pop_back();
         }

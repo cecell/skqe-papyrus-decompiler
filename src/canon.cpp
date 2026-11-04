@@ -57,7 +57,7 @@ struct CInstruction {
 
 struct CFunction {
     std::string returnType, doc;
-    uint32_t userFlags = 0;
+    std::set<std::string> userFlags;  // by name, through the script's own flag table
     uint8_t flags = 0;
     std::vector<std::pair<std::string, std::string>> params;
     std::set<std::pair<std::string, std::string>> locals;
@@ -70,7 +70,7 @@ struct CFunction {
 
 struct CVariable {
     std::string type;
-    uint32_t userFlags = 0;
+    std::set<std::string> userFlags;
     CValue initial;
     bool operator==(const CVariable& o) const {
         return type == o.type && userFlags == o.userFlags && initial == o.initial;
@@ -79,14 +79,14 @@ struct CVariable {
 
 struct CProperty {
     std::string type, doc, autoVar;
-    uint32_t userFlags = 0;
+    std::set<std::string> userFlags;
     uint8_t flags = 0;
     std::optional<CFunction> getter, setter;
 };
 
 struct CObject {
     std::string parent, doc, autoState;
-    uint32_t userFlags = 0;
+    std::set<std::string> userFlags;
     std::map<std::string, CVariable> variables;
     std::map<std::string, CProperty> properties;
     std::map<std::pair<std::string, std::string>, CFunction> functions;  // (state, name)
@@ -96,7 +96,6 @@ struct CObject {
 struct CScript {
     uint8_t major = 0, minor = 0;
     uint16_t gameId = 0;
-    std::set<std::pair<std::string, uint8_t>> userFlags;
     std::map<std::string, CObject> objects;
     bool debug = false;
     // (object, state, name, kind) -> line count
@@ -105,14 +104,29 @@ struct CScript {
 
 class Canonicalizer {
 public:
-    Canonicalizer(const Script& s, const CompareOptions& opt) : m_s(s), m_opt(opt) {}
+    Canonicalizer(const Script& s, const CompareOptions& opt)
+        : m_s(s), m_opt(opt), m_parentless(!s.objects.empty() && s.str(s.objects[0].parent).empty()) {}
+
+    // Flag bits as names: two builds with different flag tables (another
+    // .flg, another compiler) still mean the same thing when the names match.
+    std::set<std::string> flag_names(uint32_t bits) const {
+        std::set<std::string> out;
+        for (unsigned bit = 0; bit < 32; ++bit) {
+            if (!(bits & (1u << bit))) continue;
+            std::string name;
+            for (const UserFlag& f : m_s.userFlags) {
+                if (f.bit == bit) name = lower(m_s.str(f.name));
+            }
+            out.insert(name.empty() ? "bit#" + std::to_string(bit) : name);
+        }
+        return out;
+    }
 
     CScript run() {
         CScript c;
         c.major = m_s.header.major;
         c.minor = m_s.header.minor;
         c.gameId = m_s.header.gameId;
-        for (const UserFlag& f : m_s.userFlags) c.userFlags.emplace(lower(m_s.str(f.name)), f.bit);
         for (const Object& o : m_s.objects) c.objects.emplace(lower(m_s.str(o.name)), object(o));
         c.debug = m_s.debug.present;
         if (m_s.debug.present) {
@@ -126,10 +140,13 @@ public:
     }
 
 private:
-    static bool is_generated(std::string_view state, std::string_view name) {
+    bool is_generated(std::string_view state, std::string_view name) const {
         if (!state.empty()) return false;
         const std::string n = lower(name);
-        return n == "getstate" || n == "gotostate";
+        if (n == "getstate" || n == "gotostate") return true;
+        // A script with no parent gets ScriptObject's own OnBeginState and
+        // OnEndState from Bethesda's compiler; other compilers leave them out.
+        return m_parentless && (n == "onbeginstate" || n == "onendstate");
     }
 
     CValue value(const Value& v, std::map<std::string, std::string>* temps) const {
@@ -162,7 +179,7 @@ private:
         CFunction c;
         c.returnType = lower(m_s.str(f.returnType));
         c.doc = std::string(m_s.str(f.docString));
-        c.userFlags = f.userFlags;
+        c.userFlags = flag_names(f.userFlags);
         c.flags = f.flags;
         for (const Param& p : f.params) c.params.emplace_back(lower(m_s.str(p.name)), lower(m_s.str(p.type)));
         std::map<std::string, std::string> temps;
@@ -170,11 +187,22 @@ private:
         for (const Instruction& ins : f.code) {
             CInstruction ci;
             ci.op = ins.op;
-            for (const Value& v : ins.args) ci.args.push_back(value(v, tp));
+            for (const Value& v : ins.args) {
+                if (ins.op == Opcode::Return && v.type == ValueType::Identifier && lower(m_s.str(v.str())) == "::nonevar") {
+                    // Older compilers return the discarded-result slot where
+                    // the current one returns the literal None: same thing.
+                    Value none;
+                    none.type = ValueType::None;
+                    ci.args.push_back(value(none, tp));
+                    continue;
+                }
+                ci.args.push_back(value(v, tp));
+            }
             c.code.push_back(std::move(ci));
         }
         for (const Param& p : f.locals) {
             std::string name = lower(m_s.str(p.name));
+            if (name == "::nonevar") continue;  // compiler bookkeeping, present or not
             if (tp && is_temp(name)) {
                 auto it = temps.find(name);
                 // A temp never used in the code keeps a stable synthetic name.
@@ -190,15 +218,15 @@ private:
         c.parent = lower(m_s.str(o.parent));
         c.doc = std::string(m_s.str(o.docString));
         c.autoState = lower(m_s.str(o.autoState));
-        c.userFlags = o.userFlags;
+        c.userFlags = flag_names(o.userFlags);
         for (const Variable& v : o.variables) {
-            c.variables[lower(m_s.str(v.name))] = {lower(m_s.str(v.type)), v.userFlags, value(v.initial, nullptr)};
+            c.variables[lower(m_s.str(v.name))] = {lower(m_s.str(v.type)), flag_names(v.userFlags), value(v.initial, nullptr)};
         }
         for (const Property& p : o.properties) {
             CProperty cp;
             cp.type = lower(m_s.str(p.type));
             cp.doc = std::string(m_s.str(p.docString));
-            cp.userFlags = p.userFlags;
+            cp.userFlags = flag_names(p.userFlags);
             cp.flags = p.flags;
             if (p.is_auto()) cp.autoVar = lower(m_s.str(p.autoVar));
             if (p.getter) cp.getter = function(*p.getter);
@@ -218,6 +246,7 @@ private:
 
     const Script& m_s;
     const CompareOptions& m_opt;
+    bool m_parentless = false;
 };
 
 std::string ins_text(const CInstruction& i) {
@@ -343,7 +372,6 @@ public:
         if (m_opt.compareHeader && (a.major != b.major || a.minor != b.minor || a.gameId != b.gameId)) {
             add(DiffKind::Header, "", "version or game id differ");
         }
-        if (a.userFlags != b.userFlags) add(DiffKind::UserFlags, "", "user flag table differs");
         for (const auto& [on, oa] : a.objects) {
             auto it = b.objects.find(on);
             if (it == b.objects.end()) add(DiffKind::Object, on, "only in A");

@@ -105,9 +105,13 @@ struct Closure {
 // Walks the type dependencies of `s` (parent, property/variable/parameter/
 // local types, cast targets, static classes) through the resolver; `hasSource`
 // tells whether a .psc for a type exists in the caller's import folders.
+// With `declarationClosure` the dependencies (not `s` itself) contribute only
+// the types their declarations name (parent, variables, properties,
+// signatures): what a compiler needs from an import, and what a declaration
+// stub (DecompileOptions::declarationsOnly) contains.
 Closure compute_closure(const Script& s, ScriptResolver& resolver,
                         const std::function<bool(const std::string& type, std::string& where)>& hasSource,
-                        bool checkMembers = true);
+                        bool checkMembers = true, bool declarationClosure = false);
 
 // --- patch --------------------------------------------------------------------------
 

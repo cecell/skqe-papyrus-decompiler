@@ -407,6 +407,10 @@ private:
 
     void body(const Object& o, const Function& f, const std::string& name, const std::string& state, int depth) {
         if (!str(f.docString).empty()) line(depth, "{" + str(f.docString) + "}");
+        if (m_opt.declarationsOnly) {
+            report_trivial(o, name, f);
+            return;
+        }
         FunctionReport rep;
         rep.object = str(o.name);
         rep.state = state;
@@ -701,6 +705,11 @@ private:
         }
         case StmtKind::Expr: line(depth, expr(*st.rhs, 0, false, Context::Value, ctx) + line_comment(st, ctx)); break;
         case StmtKind::Assign: {
+            if (st.lhs->kind == ExprKind::Var && ctx.c->is_nonevar(st.lhs->name)) {
+                // "::NoneVar = f()": the discarded result of a call statement.
+                line(depth, expr(*st.rhs, 0, false, Context::Value, ctx) + line_comment(st, ctx));
+                break;
+            }
             // x = x op e  ->  x op= e
             const Expr& r = *st.rhs;
             if (st.lhs->kind == ExprKind::Var && r.kind == ExprKind::Binary && r.kids.size() == 2 &&

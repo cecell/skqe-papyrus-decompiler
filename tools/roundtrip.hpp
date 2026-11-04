@@ -3,8 +3,8 @@
 // level, and score. The decompiled set is its own import folder, so a
 // dependency never counts against the decompiler because its source was
 // missing or stale. With per-script import sets every script compiles
-// against exactly its own dependency closure, each dependency taken from the
-// script's own archive first. docs/ROUNDTRIP.md.
+// against exactly its own dependency closure as declaration stubs, each
+// dependency taken from the script's own archive first. docs/ROUNDTRIP.md.
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
@@ -177,19 +177,21 @@ inline int run_roundtrip(const RoundtripOptions& o, const std::vector<Item>& ite
     };
     std::unordered_map<std::string, std::unique_ptr<DepFile>> depFiles;
     std::mutex depMu;
-    auto dep_file = [&](const Item& it, const std::string* source) -> const DepFile& {
+    // `source` and `name`: the root's full decompile from phase 1; without
+    // them the item is decompiled as a declaration stub (a dependency).
+    auto dep_file = [&](const Item& it, const std::string* source, const std::string& objectName, bool stub) -> const DepFile& {
         DepFile* df = nullptr;
         size_t index = 0;
         {
             std::lock_guard<std::mutex> lk(depMu);
-            std::unique_ptr<DepFile>& slot = depFiles[it.label];
+            std::unique_ptr<DepFile>& slot = depFiles[(stub ? "stub|" : "full|") + it.label];
             if (!slot) slot = std::make_unique<DepFile>();
             df = slot.get();
             index = depFiles.size() - 1;
         }
         std::call_once(df->once, [&] {
             std::string text;
-            std::string name;
+            std::string name = objectName;
             if (source) {
                 text = *source;
             } else {
@@ -200,6 +202,7 @@ inline int run_roundtrip(const RoundtripOptions& o, const std::vector<Item>& ite
                 if (!ps || ps->objects.empty()) return;
                 pex::DecompileOptions dopt;
                 dopt.optionalObjectParams = true;
+                dopt.declarationsOnly = stub;
                 dopt.resolver = &res;
                 text = pex::decompile(*ps, dopt).source;
                 name = std::string(ps->str(ps->objects[0].name));
@@ -275,7 +278,7 @@ inline int run_roundtrip(const RoundtripOptions& o, const std::vector<Item>& ite
             }
         }
         if (o.perScript) {
-            e.decompiled = dep_file(it, &r.source).ok;
+            e.decompiled = dep_file(it, &r.source, e.name, false).ok;
         } else {
             std::ofstream f(srcDir / fs::u8path(e.name + ".psc"), std::ios::binary | std::ios::trunc);
             f.write(r.source.data(), static_cast<std::streamsize>(r.source.size()));
@@ -326,12 +329,13 @@ inline int run_roundtrip(const RoundtripOptions& o, const std::vector<Item>& ite
         std::string memberNote;
         if (o.perScript) {
             OriginResolver res(origin_of(it), &base);
-            const pex::Closure c = pex::compute_closure(e.original, res, hasSource, true);
+            const pex::Closure c = pex::compute_closure(e.original, res, hasSource, true, true);
             for (const pex::ClosureEntry& ce : c.entries) {
                 if (ce.state != pex::DepState::Missing) continue;
                 if (e.category.empty()) e.category = "incomplete closure";
                 e.detail += (e.detail.empty() ? "" : " | ") + std::string("missing ") + ce.type +
-                            (ce.neededBy.empty() ? "" : " (needed by " + ce.neededBy + ")");
+                            (ce.neededBy.empty() ? "" : " (needed by " + ce.neededBy + ")") +
+                            (ce.where.empty() ? "" : ": " + ce.where);
                 if (!o.keep) fs::remove_all(myOut, e2);
                 return;
             }
@@ -347,7 +351,7 @@ inline int run_roundtrip(const RoundtripOptions& o, const std::vector<Item>& ite
                 const bool root = &ce == &c.entries.front();
                 const Item* di = root ? &it : res.item_of(ce.type);
                 if (!di) continue;
-                const DepFile& df = dep_file(*di, nullptr);
+                const DepFile& df = root ? dep_file(*di, nullptr, e.name, false) : dep_file(*di, nullptr, std::string(), true);
                 if (!df.ok) continue;
                 const fs::path link = myImp / df.path.filename();
                 fs::create_hard_link(df.path, link, e2);
@@ -364,7 +368,16 @@ inline int run_roundtrip(const RoundtripOptions& o, const std::vector<Item>& ite
             importArg = sharedImportArg;
             cwd = srcDir;
         }
-        const RunResult r = run(compiler, {src, flagsArg, "-i=" + importArg, "-o=" + myOut.string(), "-q"}, cwd);
+        RunResult r;
+        for (int attempt = 0; attempt < 4; ++attempt) {
+            r = run(compiler, {src, flagsArg, "-i=" + importArg, "-o=" + myOut.string(), "-q"}, cwd);
+            // The antivirus still holds a freshly written import file: transient.
+            if (r.started && r.exitCode != 0 && r.output.find("error while attempting to read script") != std::string::npos) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(250 * (attempt + 1)));
+                continue;
+            }
+            break;
+        }
         const fs::path produced = myOut / fs::u8path(e.name + ".pex");
         auto cleanup = [&] {
             if (o.keep) return;

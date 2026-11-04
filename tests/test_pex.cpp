@@ -509,6 +509,15 @@ static void test_decompile() {
     CHECK(p.find("    Debug.Trace(\"hello\", 0)\n") != std::string::npos);
     CHECK(p.find("EndEvent\n") != std::string::npos);
     CHECK(p.find("::") == std::string::npos);
+    // Declaration stub: same declarations, no statements.
+    DecompileOptions stub;
+    stub.declarationsOnly = true;
+    const std::string q = decompile(s, stub).source;
+    CHECK(q.find("Int Property Count = 5 Auto\n") != std::string::npos);
+    CHECK(q.find("Event OnInit()\n") != std::string::npos);
+    CHECK(q.find("EndEvent\n") != std::string::npos);
+    CHECK(q.find("Count += 1") == std::string::npos);
+    CHECK(q.find("Debug.Trace") == std::string::npos);
 }
 
 // A script with FormID calls: literal, propagated through a local, property

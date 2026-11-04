@@ -22,7 +22,7 @@ namespace papyrus::pex {
 
 enum class DiffKind {
     Header,        // version or game id
-    UserFlags,     // the flag table
+    UserFlags,     // (no longer reported: flags are compared by name on each element)
     Object,        // name, parent, doc, flags, auto state
     Variable,      // missing, extra or different variable
     Property,      // missing, extra or different property declaration

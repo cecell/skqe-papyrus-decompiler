@@ -71,8 +71,11 @@ commands
                                walks every script the script needs, through
                                compiled files in --data; reports each as
                                pex / source (a .psc in --import) / missing,
-                               and members the chains do not declare.
-                               --emit writes declarations for the pex ones
+                               and members the chains do not declare. The
+                               closure is what a compiler needs: the script's
+                               own types, then what each dependency's
+                               declarations name. --emit writes declaration
+                               stubs (empty bodies) for the pex ones
   patch <input> --map <FormIDMap> [--callee Name,...] [--dry-run] [--backup]
                                renumbers FormID literals paired with the
                                map's plugin (EslMapLib format), renames the
@@ -853,7 +856,7 @@ int cmd_closure(int argc, char** argv) {
             rc = 1;
             continue;
         }
-        const pex::Closure c = pex::compute_closure(s, resolver, hasSource, true);
+        const pex::Closure c = pex::compute_closure(s, resolver, hasSource, true, true);
         size_t nPex = 0, nSrc = 0, nMissing = 0;
         for (const pex::ClosureEntry& e : c.entries) {
             if (e.state == pex::DepState::Pex) ++nPex;
@@ -896,6 +899,7 @@ int cmd_closure(int argc, char** argv) {
             dopt.resolver = &resolver;
             for (const pex::ClosureEntry& e : c.entries) {
                 if (e.state != pex::DepState::Pex) continue;
+                dopt.declarationsOnly = &e != &c.entries.front();  // the script itself in full
                 const pex::Script* ps = resolver.find(e.type);
                 if (!ps) continue;
                 const pex::DecompileResult r = pex::decompile(*ps, dopt);

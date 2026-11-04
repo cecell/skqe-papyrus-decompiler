@@ -63,6 +63,12 @@ struct DecompileOptions {
     // import copies (the round-trip check, the closure command), not for
     // output meant to be read.
     bool optionalObjectParams = false;
+    // Write every function and accessor with an empty body: a declaration
+    // stub that a compiler can import (parent, properties, variables,
+    // signatures, flags) without compiling the script's own code. Used for
+    // import sets, where a dependency's body compiled against another version
+    // of its callees would otherwise fail every script that imports it.
+    bool declarationsOnly = false;
     // See ScriptResolver. Not owned.
     ScriptResolver* resolver = nullptr;
 };

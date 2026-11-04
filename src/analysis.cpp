@@ -418,9 +418,31 @@ const char* to_string(DepState s) noexcept {
     return "?";
 }
 
+// The types a script's declarations name: what a compiler needs from it as
+// an import.
+static std::set<std::string> declared_types(const Script& s) {
+    std::set<std::string> out;
+    auto add = [&](std::string_view t) {
+        if (t.empty()) return;
+        const std::string b = base_type(lower(t));
+        if (!b.empty() && !is_primitive(b)) out.insert(b);
+    };
+    const Object& o = s.objects[0];
+    add(s.str(o.parent));
+    for (const Variable& v : o.variables) add(s.str(v.type));
+    for (const Property& p : o.properties) add(s.str(p.type));
+    for (const State& st : o.states) {
+        for (const NamedFunction& nf : st.functions) {
+            add(s.str(nf.body.returnType));
+            for (const Param& p : nf.body.params) add(s.str(p.type));
+        }
+    }
+    return out;
+}
+
 Closure compute_closure(const Script& s, ScriptResolver& resolver,
                         const std::function<bool(const std::string& type, std::string& where)>& hasSource,
-                        bool checkMembers) {
+                        bool checkMembers, bool declarationClosure) {
     Closure c;
     if (s.objects.empty()) return c;
     std::map<std::string, size_t> seen;
@@ -437,6 +459,14 @@ Closure compute_closure(const Script& s, ScriptResolver& resolver,
         e.neededBy = by;
         const Script* ps = type == root ? &s : resolver.find(type);
         std::string where;
+        if (ps && type != root && !ps->objects.empty() && lower(ps->str(ps->objects[0].name)) != type) {
+            // The file is there, but it is a renamed copy of another script:
+            // neither the compiler nor the game accepts it under this name.
+            e.state = DepState::Missing;
+            e.where = "the compiled file named " + type + " declares " + std::string(ps->str(ps->objects[0].name));
+            c.entries.push_back(e);
+            continue;
+        }
         if (ps) {
             e.state = DepState::Pex;
         } else if (hasSource && hasSource(type, where)) {
@@ -447,6 +477,12 @@ Closure compute_closure(const Script& s, ScriptResolver& resolver,
         }
         c.entries.push_back(e);
         if (!ps) continue;  // a source-only or missing type cannot be walked further
+        if (declarationClosure && type != root) {
+            for (const std::string& t : declared_types(*ps)) {
+                if (!seen.count(t)) queue.emplace_back(t, type);
+            }
+            continue;
+        }
         Dependencies d = find_dependencies(*ps, &resolver, nullptr);
         for (const std::string& t : d.types) {
             if (!seen.count(t)) queue.emplace_back(t, type);
