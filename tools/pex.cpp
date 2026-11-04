@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "inputs.hpp"
 #include "papyrus/analysis.hpp"
+#include "papyrus/assemble.hpp"
 #include "papyrus/canon.hpp"
 #include "papyrus/decompile.hpp"
 #include "papyrus/pex.hpp"
@@ -17,7 +18,9 @@
 #include <memory>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <ctime>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <string>
@@ -45,6 +48,11 @@ commands
   info <input>                 header facts and counts (--json)
   json <input> [--out <path>]  the whole model as JSON
   asm <input> [--out <path>]   Papyrus assembly, as PapyrusAssembler reads it
+  assemble <listing.pas|dir> [--out <path>]
+                               our assembler: the listing (the form asm writes
+                               and PapyrusCompiler -keepasm writes) becomes a
+                               .pex, <name>.pex next to the listing or at --out
+                               (a directory when there are several)
   decompile <input> [--out <path>] [--resolve <dir|bsa>] [--comments]
             [--keep-generated] [--optional-objects]
                                Papyrus source; functions that cannot be
@@ -87,6 +95,12 @@ commands
                                from <dir> (the game's "Papyrus Compiler"
                                folder) and compare the result with the
                                original at model level
+  check --assemble <input> [--tools <dir>]
+                               assemble our listing with our own assembler
+                               and compare with the original at model level,
+                               and the listing of the result with the
+                               listing; with --tools also with what
+                               PapyrusAssembler.exe makes of the listing
   check --roundtrip <input> --tools <dir> [--import <dir;dir>] [--flags <flg>]
             [--resolve <dir|bsa>] [--per-script-imports]
                                decompile every script, compile the result
@@ -124,6 +138,7 @@ struct Options {
     bool keep = false;
     bool rewrite = false;
     bool asmCheck = false;
+    bool assembleCheck = false;
     bool roundtrip = false;
     bool perScript = false;
     std::string imports;
@@ -156,6 +171,7 @@ bool parse(int argc, char** argv, int from, Options& o, const char* cmd) {
         else if (a == "--keep") o.keep = true;
         else if (a == "--rewrite") o.rewrite = true;
         else if (a == "--asm") o.asmCheck = true;
+        else if (a == "--assemble") o.assembleCheck = true;
         else if (a == "--roundtrip") o.roundtrip = true;
         else if (a == "--per-script-imports") o.perScript = true;
         else if (a == "--import" && hasNext) o.imports = argv[++i];
@@ -395,6 +411,68 @@ int cmd_render(int argc, char** argv, const char* cmd, const char* ext,
 std::string render_json(const pex::Script& s) { return pex::to_json(s, true); }
 std::string render_asm(const pex::Script& s) { return pex::to_asm(s); }
 
+// --- assemble ----------------------------------------------------------------
+
+int cmd_assemble(int argc, char** argv) {
+    Options o;
+    if (!parse(argc, argv, 2, o, "assemble")) return 2;
+    if (o.inputs.empty()) {
+        std::fprintf(stderr, "no input given\n");
+        return 2;
+    }
+    std::vector<fs::path> listings;
+    std::error_code ec;
+    for (const std::string& in : o.inputs) {
+        const fs::path p = fs::u8path(in);
+        if (fs::is_directory(p, ec)) {
+            for (const fs::directory_entry& e : fs::recursive_directory_iterator(p, ec)) {
+                if (e.is_regular_file(ec) && e.path().extension() == ".pas") listings.push_back(e.path());
+            }
+        } else if (fs::is_regular_file(p, ec)) {
+            listings.push_back(p);
+        } else {
+            std::fprintf(stderr, "%s: does not exist\n", in.c_str());
+            return 2;
+        }
+    }
+    if (listings.size() > 1 && o.out.empty()) {
+        std::fprintf(stderr, "assemble: %zu listings; give --out <directory>\n", listings.size());
+        return 2;
+    }
+    const bool toDir = listings.size() > 1 || (!o.out.empty() && fs::is_directory(fs::u8path(o.out), ec));
+    if (toDir) fs::create_directories(fs::u8path(o.out), ec);
+    int failures = 0;
+    for (const fs::path& in : listings) {
+        std::string text;
+        {
+            std::ifstream f(in, std::ios::binary);
+            if (!f) {
+                std::fprintf(stderr, "%s: cannot read\n", in.string().c_str());
+                ++failures;
+                continue;
+            }
+            text.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+        }
+        pex::Script s;
+        std::string err;
+        const pex::Status st = pex::assemble(text, s, &err);
+        if (st != pex::Status::Ok) {
+            std::fprintf(stderr, "%s: %s\n", in.string().c_str(), err.c_str());
+            ++failures;
+            continue;
+        }
+        fs::path target;
+        if (o.out.empty()) target = fs::path(in).replace_extension(".pex");
+        else if (toDir) target = fs::u8path(o.out) / in.filename().replace_extension(".pex");
+        else target = fs::u8path(o.out);
+        if (pex::write_file(s, target, &err) != pex::Status::Ok) {
+            std::fprintf(stderr, "%s: cannot write %s: %s\n", in.string().c_str(), target.string().c_str(), err.c_str());
+            ++failures;
+        }
+    }
+    return failures ? 1 : 0;
+}
+
 // --- decompile ---------------------------------------------------------------
 
 int cmd_decompile(int argc, char** argv) {
@@ -542,24 +620,84 @@ int check_rewrite(const Options& o, const std::vector<pextool::Item>& items) {
     return tally.finish(items.size(), std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
 }
 
-int check_asm(const Options& o, const std::vector<pextool::Item>& items) {
+// Writes `text` as <dir>/<name>.pas, runs PapyrusAssembler on it and reads
+// the .pex it produces. On failure `category` and `detail` say what happened.
+bool assemble_with_tool(const fs::path& assembler, const fs::path& dir, const std::string& name,
+                        const std::string& text, pex::Script& out, std::string& category, std::string& detail) {
+    std::error_code e2;
+    const fs::path pas = dir / fs::u8path(name + ".pas");
+    {
+        std::ofstream f(pas, std::ios::binary | std::ios::trunc);
+        f.write(text.data(), static_cast<std::streamsize>(text.size()));
+        if (!f) {
+            category = "cannot write listing";
+            detail = pas.string();
+            return false;
+        }
+    }
+    // "Cannot open store" is the assembler failing to open a file that is
+    // there; it happens right after the file was written (antivirus
+    // scanning holds it) and passes on retry.
+    pextool::RunResult r;
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        if (attempt) std::this_thread::sleep_for(std::chrono::milliseconds(100 * attempt));
+        r = pextool::run(assembler, {name, "-Q"}, dir);
+        if (!r.started || r.exitCode == 0 || r.output.find("Cannot open store") == std::string::npos) break;
+    }
+    if (!r.started) {
+        category = "assembler not started";
+        detail = assembler.string();
+        return false;
+    }
+    const fs::path produced = dir / fs::u8path(name + ".pex");
+    if (r.exitCode != 0 || !fs::exists(produced, e2)) {
+        category = "assembler rejected";
+        detail = first_error_line(r.output);
+        return false;
+    }
+    std::string err;
+    if (pex::read_file(produced, out, &err) != pex::Status::Ok) {
+        category = "assembler output unreadable";
+        detail = err;
+        return false;
+    }
+    return true;
+}
+
+// The PapyrusAssembler.exe of --tools, or an empty path (with a message) when
+// it is not there.
+fs::path find_tool(const Options& o, const char* exe, const char* forWhat, bool required) {
     if (o.tools.empty()) {
-        std::fprintf(stderr, "check --asm needs --tools <Papyrus Compiler folder>\n");
-        return 2;
+        if (required) std::fprintf(stderr, "%s needs --tools <Papyrus Compiler folder>\n", forWhat);
+        return {};
     }
-    const fs::path assembler = fs::u8path(o.tools) / "PapyrusAssembler.exe";
+    const fs::path tool = fs::u8path(o.tools) / exe;
     std::error_code ec;
-    if (!fs::exists(assembler, ec)) {
-        std::fprintf(stderr, "%s not found\n", assembler.string().c_str());
-        return 2;
+    if (!fs::exists(tool, ec)) {
+        std::fprintf(stderr, "%s not found\n", tool.string().c_str());
+        return {};
     }
+    return tool;
+}
+
+fs::path make_work_dir(const Options& o) {
+    std::error_code ec;
     fs::path work = o.work.empty() ? fs::temp_directory_path(ec) / ("pex-check-" + std::to_string(::_getpid()))
                                    : fs::u8path(o.work);
     fs::create_directories(work, ec);
     if (ec) {
         std::fprintf(stderr, "cannot create %s\n", work.string().c_str());
-        return 2;
+        return {};
     }
+    return work;
+}
+
+int check_asm(const Options& o, const std::vector<pextool::Item>& items) {
+    const fs::path assembler = find_tool(o, "PapyrusAssembler.exe", "check --asm", true);
+    if (assembler.empty()) return 2;
+    const fs::path work = make_work_dir(o);
+    if (work.empty()) return 2;
+    std::error_code ec;
 
     const auto t0 = std::chrono::steady_clock::now();
     Tally tally;
@@ -580,39 +718,10 @@ int check_asm(const Options& o, const std::vector<pextool::Item>& items) {
         const fs::path dir = work / std::to_string(i);
         std::error_code e2;
         fs::create_directories(dir, e2);
-        const fs::path pas = dir / fs::u8path(name + ".pas");
-        {
-            const std::string text = pex::to_asm(original);
-            std::ofstream f(pas, std::ios::binary | std::ios::trunc);
-            f.write(text.data(), static_cast<std::streamsize>(text.size()));
-            if (!f) {
-                tally.fail(it, "cannot write listing", pas.string());
-                return;
-            }
-        }
-        // "Cannot open store" is the assembler failing to open a file that is
-        // there; it happens right after the file was written (antivirus
-        // scanning holds it) and passes on retry.
-        pextool::RunResult r;
-        for (int attempt = 0; attempt < 4; ++attempt) {
-            if (attempt) std::this_thread::sleep_for(std::chrono::milliseconds(100 * attempt));
-            r = pextool::run(assembler, {name, "-Q"}, dir);
-            if (!r.started || r.exitCode == 0 || r.output.find("Cannot open store") == std::string::npos) break;
-        }
-        if (!r.started) {
-            tally.fail(it, "assembler not started", assembler.string());
-            return;
-        }
-        const fs::path produced = dir / fs::u8path(name + ".pex");
-        if (r.exitCode != 0 || !fs::exists(produced, e2)) {
-            tally.fail(it, "assembler rejected", first_error_line(r.output));
-            return;
-        }
         pex::Script assembled;
-        std::string err;
-        const pex::Status st = pex::read_file(produced, assembled, &err);
-        if (st != pex::Status::Ok) {
-            tally.fail(it, "assembler output unreadable", err);
+        std::string category, detail;
+        if (!assemble_with_tool(assembler, dir, name, pex::to_asm(original), assembled, category, detail)) {
+            tally.fail(it, category, detail);
             return;
         }
         std::vector<pex::Difference> diffs;
@@ -629,17 +738,93 @@ int check_asm(const Options& o, const std::vector<pextool::Item>& items) {
     return tally.finish(items.size(), std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
 }
 
+// Our assembler against the original, and (with --tools) against
+// PapyrusAssembler's reading of the same listing.
+int check_assemble(const Options& o, const std::vector<pextool::Item>& items) {
+    const fs::path assembler = find_tool(o, "PapyrusAssembler.exe", "check --assemble", false);
+    if (!o.tools.empty() && assembler.empty()) return 2;
+    fs::path work;
+    if (!assembler.empty()) {
+        work = make_work_dir(o);
+        if (work.empty()) return 2;
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    Tally tally;
+    tally.quiet = o.quiet;
+    std::mutex mu;
+    pextool::for_each_parallel(items, o.threads, [&](size_t i, const pextool::Item& it, pextool::Loader& ld) {
+        pex::Script original;
+        if (!load_script(it, ld, original, mu)) {
+            tally.fail(it, "unreadable", "");
+            return;
+        }
+        if (original.objects.empty()) {
+            tally.fail(it, "no object", "");
+            return;
+        }
+        const std::string listing = pex::to_asm(original);
+        pex::Script ours;
+        std::string err;
+        if (pex::assemble(listing, ours, &err) != pex::Status::Ok) {
+            tally.fail(it, "assemble error", err);
+            return;
+        }
+        std::vector<pex::Difference> diffs;
+        pex::CompareOptions co;
+        co.compareHeader = false;  // old mods carry version 3.1; the assembler writes 3.2
+        if (!pex::canonical_equal(original, ours, &diffs, co)) {
+            tally.fail(it, "model differs", difference_text(diffs));
+            return;
+        }
+        if (pex::to_asm(ours) != listing) {
+            tally.fail(it, "listing differs", "the listing of the assembled model is not the input listing");
+            return;
+        }
+        std::vector<uint8_t> bytes;
+        pex::Script again;
+        if (pex::write(ours, bytes, &err) != pex::Status::Ok || pex::read(bytes.data(), bytes.size(), again, &err) != pex::Status::Ok) {
+            tally.fail(it, "write failed", err);
+            return;
+        }
+        if (!assembler.empty()) {
+            const std::string name = std::string(original.str(original.objects[0].name));
+            const fs::path dir = work / std::to_string(i);
+            std::error_code e2;
+            fs::create_directories(dir, e2);
+            pex::Script theirs;
+            std::string category, detail;
+            if (!assemble_with_tool(assembler, dir, name, listing, theirs, category, detail)) {
+                tally.fail(it, category, detail);
+                return;
+            }
+            diffs.clear();
+            if (!pex::canonical_equal(theirs, ours, &diffs, co)) {
+                tally.fail(it, "differs from PapyrusAssembler", difference_text(diffs));
+                return;
+            }
+            if (!o.keep) fs::remove_all(dir, e2);
+        }
+        tally.pass();
+    });
+    if (!work.empty() && !o.keep) {
+        std::error_code ec;
+        fs::remove_all(work, ec);
+    }
+    return tally.finish(items.size(), std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+}
+
 int cmd_check(int argc, char** argv) {
     Options o;
     if (!parse(argc, argv, 2, o, "check")) return 2;
-    if (int(o.rewrite) + int(o.asmCheck) + int(o.roundtrip) != 1) {
-        std::fprintf(stderr, "check: give exactly one of --rewrite, --asm, --roundtrip (pex help)\n");
+    if (int(o.rewrite) + int(o.asmCheck) + int(o.assembleCheck) + int(o.roundtrip) != 1) {
+        std::fprintf(stderr, "check: give exactly one of --rewrite, --asm, --assemble, --roundtrip (pex help)\n");
         return 2;
     }
     std::vector<pextool::Item> items;
     if (!collect(o, items)) return 2;
     if (o.rewrite) return check_rewrite(o, items);
     if (o.asmCheck) return check_asm(o, items);
+    if (o.assembleCheck) return check_assemble(o, items);
     if (o.tools.empty()) {
         std::fprintf(stderr, "check --roundtrip needs --tools <Papyrus Compiler folder>\n");
         return 2;
@@ -1044,6 +1229,7 @@ int main(int argc, char** argv_) {
     if (cmd == "info") return cmd_info(argc, argv.data());
     if (cmd == "json") return cmd_render(argc, argv.data(), "json", ".json", render_json);
     if (cmd == "asm") return cmd_render(argc, argv.data(), "asm", ".pas", render_asm);
+    if (cmd == "assemble") return cmd_assemble(argc, argv.data());
     if (cmd == "decompile") return cmd_decompile(argc, argv.data());
     if (cmd == "refs") return cmd_refs(argc, argv.data());
     if (cmd == "deps") return cmd_deps(argc, argv.data());

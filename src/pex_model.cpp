@@ -17,6 +17,7 @@ const char* to_string(Status s) noexcept {
     case Status::TooLarge: return "too large";
     case Status::IoError: return "I/O error";
     case Status::BadModel: return "inconsistent model";
+    case Status::Syntax: return "syntax error";
     }
     return "?";
 }

@@ -35,6 +35,7 @@ enum class Status {
     TooLarge,    // a declared size exceeds what this library will allocate
     IoError,     // the file could not be opened or read
     BadModel,    // write(): the model is inconsistent (string index out of range, ...)
+    Syntax,      // assemble(): the listing could not be read (the error names the line)
 };
 const char* to_string(Status s) noexcept;
 

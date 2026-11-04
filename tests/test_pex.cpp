@@ -3,6 +3,7 @@
 // `--seeds <dir>` writes the hand-built inputs for the fuzzer.
 // SPDX-License-Identifier: GPL-3.0-only
 #include "papyrus/analysis.hpp"
+#include "papyrus/assemble.hpp"
 #include "papyrus/canon.hpp"
 #include "papyrus/decompile.hpp"
 #include "papyrus/pex.hpp"
@@ -11,6 +12,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -610,6 +612,264 @@ static void test_refs_and_patch() {
     CHECK(d.source.find("Int id = 2562") != std::string::npos);
 }
 
+// --- the assembler ----------------------------------------------------------
+
+static void test_assemble() {
+    for (const bool withDebug : {true, false}) {
+        const B b = sample(withDebug);
+        Script s;
+        std::string err;
+        CHECK_STATUS(read(b.v.data(), b.v.size(), s, &err), Status::Ok);
+        const std::string listing = to_asm(s);
+        Script a;
+        CHECK_STATUS(assemble(listing, a, &err), Status::Ok);
+        CHECK(err.empty());
+        // Like PapyrusAssembler, the result always carries debug info; for
+        // a listing without line comments every record is empty.
+        CHECK(a.debug.present);
+        if (!withDebug) {
+            CHECK(a.debug.functions.size() == 2 && a.debug.functions[0].lines.empty() && a.debug.functions[1].lines.empty());
+            a.debug = s.debug;
+        }
+        CHECK(canonical_equal(s, a));
+        CHECK(to_asm(a) == listing);
+        if (withDebug) {
+            CHECK(a.debug.modificationTime == 0x5E000000ull);
+            // Records in the order the listing meets the functions: the
+            // getter first (property table), then OnInit.
+            CHECK(a.debug.functions.size() == 2 && a.debug.functions[0].kind == FunctionKind::Getter &&
+                  a.debug.functions[1].lines.size() == 4 && a.debug.functions[1].lines[3] == 12);
+        }
+        CHECK(a.header.sourceName == "Sample.psc" && a.header.userName == "user" && a.header.compileTime == 0x5F000000ull);
+        std::vector<uint8_t> out;
+        CHECK_STATUS(write(a, out, &err), Status::Ok);
+        Script again;
+        CHECK_STATUS(read(out.data(), out.size(), again, &err), Status::Ok);
+        CHECK(canonical_equal(s, again));
+    }
+
+    // Operand typing, escapes, labels, the compiler's own spellings (tabs,
+    // trailing spaces, lowercase none/false, numeric jump offsets).
+    const char* text =
+        ".info\n"
+        "\t.source \"T.psc\"\n"
+        "  .modifyTime 5\n"
+        "  .compileTime 6\n"
+        "  .user \"u\"\n"
+        "  .computer \"c\"\n"
+        ".endInfo\n"
+        ".userFlagsRef\n"
+        "  .flag hidden 0\n"
+        ".endUserFlagsRef\n"
+        ".objectTable\n"
+        "  .object T ScriptObject\n"
+        "    .userFlags 0\n"
+        "    .docString \"quote \\\" backslash \\\\ nl \\n tab \\t\"\n"
+        "    .autoState \n"
+        "    .variableTable\n"
+        "      .variable ::X_var int\n"
+        "        .userFlags 1\n"
+        "        .initialValue -7\n"
+        "      .endVariable\n"
+        "      .variable f float\n"
+        "        .userFlags 0\n"
+        "        .initialValue 1.5\n"
+        "      .endVariable\n"
+        "      .variable n string\n"
+        "        .userFlags 0\n"
+        "        .initialValue \"s\"\n"
+        "      .endVariable\n"
+        "    .endVariableTable\n"
+        "    .propertyTable\n"
+        "      .property X Int auto\n"
+        "        .userFlags 0\n"
+        "        .docString \"\"\n"
+        "        .autoVar ::X_var\n"
+        "      .endProperty\n"
+        "      .property R Bool\n"
+        "        .userFlags 0\n"
+        "        .docString \"\"\n"
+        "        .function get \n"
+        "          .userFlags 0\n"
+        "          .docString \"\"\n"
+        "          .return bool\n"
+        "          .paramTable\n"
+        "          .endParamTable\n"
+        "          .localTable\n"
+        "          .endLocalTable\n"
+        "          .code\n"
+        "            RETURN true ;@line 3\n"
+        "          .endCode\n"
+        "        .endFunction\n"
+        "      .endProperty\n"
+        "    .endPropertyTable\n"
+        "    .stateTable\n"
+        "      .state\n"
+        "        .function Go static\n"
+        "          .userFlags 0\n"
+        "          .docString \"\"\n"
+        "          .return NONE\n"
+        "          .paramTable\n"
+        "            .param a Int\n"
+        "          .endParamTable\n"
+        "          .localTable\n"
+        "            .local ::temp0 bool\n"
+        "            .local ::nonevar none\n"
+        "          .endLocalTable\n"
+        "          .code\n"
+        "            COMPAREEQ ::temp0 a 0 ;@line 10\n"
+        "            JUMPF ::temp0 label1 ;@line 10\n"
+        "            CALLSTATIC debug Trace ::nonevar \"zero\" 0 ;@line 11\n"
+        "            JUMP label0\n"
+        "            label1:\n"
+        "            CallMethod Foo self ::NoneVar false None 2.0 ; a comment\n"
+        "            JUMP 1\n"
+        "            label0:\n"
+        "          .endCode\n"
+        "        .endFunction\n"
+        "        .function Nat native\n"
+        "          .userFlags 0\n"
+        "          .docString \"\"\n"
+        "          .return Int\n"
+        "          .paramTable\n"
+        "          .endParamTable\n"
+        "        .endFunction\n"
+        "      .endState\n"
+        "      .state busy\n"
+        "        .function Go\n"
+        "          .userFlags 0\n"
+        "          .docString \"\"\n"
+        "          .return None\n"
+        "          .paramTable\n"
+        "            .param a Int\n"
+        "          .endParamTable\n"
+        "          .localTable\n"
+        "          .endLocalTable\n"
+        "          .code\n"
+        "            RETURN None ;@line 20\n"
+        "          .endCode\n"
+        "        .endFunction\n"
+        "        .function Other\n"
+        "          .userFlags 0\n"
+        "          .docString \"\"\n"
+        "          .return None\n"
+        "          .paramTable\n"
+        "          .endParamTable\n"
+        "          .localTable\n"
+        "          .endLocalTable\n"
+        "          .code\n"
+        "            RETURN None ;@line 22\n"
+        "          .endCode\n"
+        "        .endFunction\n"
+        "      .endState\n"
+        "    .endStateTable\n"
+        "  .endObject\n"
+        ".endObjectTable\n";
+    Script t;
+    std::string err;
+    CHECK_STATUS(assemble(text, t, &err), Status::Ok);
+    CHECK(err.empty());
+    CHECK(t.objects.size() == 1);
+    if (t.objects.size() == 1) {
+        const Object& o = t.objects[0];
+        CHECK(t.str(o.docString) == "quote \" backslash \\ nl \n tab \t");
+        CHECK(t.str(o.autoState).empty());
+        CHECK(o.variables.size() == 3);
+        CHECK(o.variables[0].initial.type == ValueType::Integer && o.variables[0].initial.as_int() == -7 && o.variables[0].userFlags == 1);
+        CHECK(o.variables[1].initial.type == ValueType::Float && o.variables[1].initial.as_float() == 1.5f);
+        CHECK(o.variables[2].initial.type == ValueType::String && t.str(o.variables[2].initial.str()) == "s");
+        CHECK(o.properties.size() == 2 && o.properties[0].flags == (kPropRead | kPropWrite | kPropAutoVar));
+        CHECK(o.properties[1].flags == kPropRead && o.properties[1].getter && !o.properties[1].setter);
+        CHECK(o.properties[1].getter->code.size() == 1 && o.properties[1].getter->code[0].args[0].type == ValueType::Bool);
+        CHECK(o.states.size() == 2 && o.states[0].functions.size() == 2);
+        const Function& go = o.states[0].functions[0].body;
+        CHECK(go.is_global() && !go.is_native() && t.str(go.returnType) == "None");  // built-in names get the reference spelling
+        CHECK(go.params.size() == 1 && go.locals.size() == 2);
+        CHECK(go.code.size() == 6);
+        if (go.code.size() == 6) {
+            CHECK(go.code[1].op == Opcode::JmpF && go.code[1].args[1].type == ValueType::Integer && go.code[1].args[1].as_int() == 3);
+            CHECK(go.code[3].op == Opcode::Jmp && go.code[3].args[0].as_int() == 3);
+            CHECK(go.code[4].op == Opcode::CallMethod && go.code[4].args.size() == 6);
+            CHECK(go.code[4].args[3].type == ValueType::Bool && !go.code[4].args[3].as_bool());
+            CHECK(go.code[4].args[4].type == ValueType::None);
+            CHECK(go.code[4].args[5].type == ValueType::Float && go.code[4].args[5].as_float() == 2.0f);
+            CHECK(go.code[5].op == Opcode::Jmp && go.code[5].args[0].as_int() == 1);
+        }
+        const Function& nat = o.states[0].functions[1].body;
+        CHECK(nat.is_native() && nat.code.empty() && nat.locals.empty());
+        // ::nonevar and ::NoneVar are one string, first spelling kept; the
+        // types int / bool are stored as Int / Bool.
+        StrIdx idx;
+        CHECK(t.find_string("::nonevar", idx) && !t.find_string("::NoneVar", idx));
+        CHECK(t.find_string("Int", idx) && !t.find_string("int", idx) && t.find_string("Bool", idx));
+    }
+    // Debug records: one per function; Nat (no ;@line) has none of its own
+    // lines; busy's Go is the first of its block and keeps its label; Other,
+    // the second, is labelled with the default state.
+    CHECK(t.debug.present && t.debug.functions.size() == 5);
+    if (t.debug.functions.size() == 5) {
+        CHECK(t.debug.functions[0].kind == FunctionKind::Getter && t.debug.functions[0].lines.size() == 1);
+        CHECK(t.str(t.debug.functions[1].name) == "Go" && t.str(t.debug.functions[1].state).empty());
+        CHECK(t.debug.functions[1].lines.size() == 6 && t.debug.functions[1].lines[3] == 11 && t.debug.functions[1].lines[5] == 11);
+        CHECK(t.str(t.debug.functions[2].name) == "Nat" && t.debug.functions[2].lines.empty());
+        CHECK(t.str(t.debug.functions[3].name) == "Go" && t.str(t.debug.functions[3].state) == "busy");
+        CHECK(t.debug.functions[3].lines.size() == 1 && t.debug.functions[3].lines[0] == 20);
+        CHECK(t.str(t.debug.functions[4].name) == "Other" && t.str(t.debug.functions[4].state).empty());
+    }
+    // It writes, and the listing of the result assembles to the same model.
+    std::vector<uint8_t> out;
+    CHECK_STATUS(write(t, out, &err), Status::Ok);
+    Script t2;
+    CHECK_STATUS(assemble(to_asm(t), t2, &err), Status::Ok);
+    CHECK(canonical_equal(t, t2));
+
+    // Errors name the line.
+    struct Bad {
+        const char* text;
+        const char* message;
+        int line;
+    };
+    const Bad bad[] = {
+        {".info\n.endInfo\n.bogus\n", "expected .info", 3},
+        {".info\n.endInfo\n", "no .objectTable", 2},
+        {".objectTable\n.object A\n.stateTable\n.state\n.function F\n.code\nIADD a b\n.endCode\n.endFunction\n.endState\n.endStateTable\n.endObject\n.endObjectTable\n", "IADD takes 3", 7},
+        {".objectTable\n.object A\n.stateTable\n.state\n.function F\n.code\nJUMP nowhere\n.endCode\n.endFunction\n.endState\n.endStateTable\n.endObject\n.endObjectTable\n", "undefined label nowhere", 7},
+        {".objectTable\n.object A\n.docString \"open\n.endObject\n.endObjectTable\n", "unterminated string", 3},
+        {".objectTable\n.object A\n.stateTable\n.state\n.function F native\n.code\n.endCode\n.endFunction\n.endState\n.endStateTable\n.endObject\n.endObjectTable\n", "native function has no .code", 6},
+        {".objectTable\n.object A\n.stateTable\n.state\n.function F\n.code\nFROB a\n.endCode\n.endFunction\n.endState\n.endStateTable\n.endObject\n.endObjectTable\n", "unknown mnemonic FROB", 7},
+        {".objectTable\n.object A\n", "missing .endObject", 2},
+    };
+    for (const Bad& x : bad) {
+        Script z;
+        err.clear();
+        CHECK_STATUS(assemble(x.text, z, &err), Status::Syntax);
+        CHECK(err.find(x.message) != std::string::npos);
+        CHECK(err.rfind("line " + std::to_string(x.line) + ":", 0) == 0);
+        if (err.find(x.message) == std::string::npos || err.rfind("line " + std::to_string(x.line) + ":", 0) != 0) {
+            std::fprintf(stderr, "  got: %s\n", err.c_str());
+        }
+    }
+
+    // The compiler's own listing of Probe01, when the test runs in the repo.
+    for (const char* rel : {"probes/Probe01_AllOps.pas.txt", "../probes/Probe01_AllOps.pas.txt"}) {
+        std::ifstream f(rel, std::ios::binary);
+        if (!f) continue;
+        const std::string probe((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        Script p;
+        err.clear();
+        CHECK_STATUS(assemble(probe, p, &err), Status::Ok);
+        if (!err.empty()) std::fprintf(stderr, "  %s\n", err.c_str());
+        CHECK(p.objects.size() == 1 && p.objects[0].states.size() == 3 && p.objects[0].properties.size() == 6);
+        CHECK(p.debug.present && p.debug.modificationTime == 1793743743ull);
+        std::vector<uint8_t> out2;
+        CHECK_STATUS(write(p, out2, &err), Status::Ok);
+        Script p2;
+        CHECK_STATUS(assemble(to_asm(p), p2, &err), Status::Ok);
+        CHECK(canonical_equal(p, p2));
+        break;
+    }
+}
+
 static void write_seeds(const fs::path& dir) {
     std::error_code ec;
     fs::create_directories(dir, ec);
@@ -619,6 +879,11 @@ static void write_seeds(const fs::path& dir) {
                                                                      static_cast<std::streamsize>(a.v.size()));
     std::ofstream(dir / "sample_nodebug.pex", std::ios::binary).write(reinterpret_cast<const char*>(b.v.data()),
                                                                        static_cast<std::streamsize>(b.v.size()));
+    Script s;
+    if (read(a.v.data(), a.v.size(), s) == Status::Ok) {
+        const std::string listing = to_asm(s);
+        std::ofstream(dir / "sample.pas", std::ios::binary).write(listing.data(), static_cast<std::streamsize>(listing.size()));
+    }
 }
 
 int main(int argc, char** argv) {
@@ -632,6 +897,7 @@ int main(int argc, char** argv) {
     test_asm_and_canon();
     test_decompile();
     test_refs_and_patch();
+    test_assemble();
     if (g_failures) {
         std::fprintf(stderr, "%d failure(s)\n", g_failures);
         return 1;

@@ -16,8 +16,10 @@ script on a modded machine, and the numbers are in the docs. What it does:
    scripts in a modded Data folder; the other two are a truncated backup and
    a file that is not a script. Damaged files are refused with a sentence
    naming what was wrong and at which byte; nothing throws.
-2. **Papyrus assembly** in the syntax `PapyrusAssembler.exe` reads. Every one
-   of the 14,026 vanilla scripts assembles back to the identical model.
+2. **Papyrus assembly** in the syntax `PapyrusAssembler.exe` reads, and an
+   **assembler** for it. Every one of the 14,026 vanilla scripts assembles
+   back to the identical model through Bethesda's assembler and through
+   ours, and the two agree on all 14,026 (ours takes 0.2 s for the lot).
 3. **Decompiler.** Bytecode to structured source: `If`/`ElseIf`/`Else`,
    `While`, `&&`/`||`, compiler temporaries folded away, implicit casts and
    omitted arguments restored, locals declared in their scopes. All 26,657
@@ -75,6 +77,8 @@ target_link_libraries(your_target PRIVATE skqe::papyrus)
 pex info <input>                 header facts and counts (--json)
 pex json <input> [--out <path>]  the whole model as JSON
 pex asm <input> [--out <path>]   Papyrus assembly (PapyrusAssembler syntax)
+pex assemble <listing> [--out <path>]
+                                 the listing back to a .pex (our assembler)
 pex decompile <input> [--out <path>] [--resolve <Data>]
                                  Papyrus source; --resolve lets it consult the
                                  other scripts (parent chains, declarations)
@@ -84,6 +88,7 @@ pex closure <script.pex> --data <Data> [--import <dirs>] [--emit <dir>]
 pex patch <input> --map <FormIDMap> [--dry-run] [--backup]
 pex check --rewrite <input>      read + write, compare byte for byte
 pex check --asm <input> --tools "<game>\Papyrus Compiler"
+pex check --assemble <input> [--tools "<game>\Papyrus Compiler"]
 pex check --roundtrip <input> --tools "<game>\Papyrus Compiler" [--resolve <Data>]
                                  [--per-script-imports]   (mixed sets: mods)
 ```
@@ -93,7 +98,8 @@ every `.bsa`) or one `.bsa`. Work is spread over all cores. `pex help` has
 the details.
 
 Speed (modded Data folder, 77,000 scripts, 32 threads, 2026-11-03): parsing
-everything for `refs` 3.4 s; byte-exact rewrite check 1.3 s; decompiling the
+everything for `refs` 3.4 s; byte-exact rewrite check 1.3 s; listing,
+assembling and comparing all 77,000 (`check --assemble`) 2.7 s; decompiling the
 14,026 vanilla scripts to files 6.8 s, of which the decompiler itself is about
 one millisecond per script single-threaded and the rest is creating 14,000
 files (writing the same files as assembly takes 7.5 s); the dependency
@@ -105,7 +111,8 @@ nothing in the normal workflow calls a compiler.
 ## Format notes that matter
 
 [docs/PEX_FORMAT.md](docs/PEX_FORMAT.md), [docs/OPCODES.md](docs/OPCODES.md),
-[docs/ASM_SYNTAX.md](docs/ASM_SYNTAX.md) and
+[docs/ASM_SYNTAX.md](docs/ASM_SYNTAX.md) (including what Bethesda's assembler
+does to a listing) and
 [docs/COMPILER_PATTERNS.md](docs/COMPILER_PATTERNS.md), the last being the
 catalog of how Bethesda's compiler lowers each construct, found by probing
 and by the round trip. It is also the specification a future compiler has to
@@ -124,9 +131,11 @@ of the build. Elsewhere: `cmake -B build && cmake --build build && ctest --test-
 
 ```
 include/papyrus/   pex.hpp (model, read/write, views), canon.hpp (comparison),
-                   layout.hpp (source order), decompile.hpp, analysis.hpp
-src/               reader, writer, JSON, assembly, canon, layout, analysis,
-                   decompile/ (lift, structure, psc_writer, event_names.inc)
+                   layout.hpp (source order), assemble.hpp (assembler),
+                   decompile.hpp, analysis.hpp
+src/               reader, writer, JSON, assembly writer and assembler, canon,
+                   layout, analysis, decompile/ (lift, structure, psc_writer,
+                   event_names.inc)
 tools/             pex.cpp (CLI), inputs.hpp, process.hpp, resolver.hpp,
                    roundtrip.hpp, gen_event_names.py
 tests/             unit tests on synthetic scripts, fuzz target
