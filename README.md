@@ -26,7 +26,7 @@ script on a modded machine, and the numbers are in the docs. What it does:
    taking the file with it. The score that matters is the round trip:
    decompile, compile with `PapyrusCompiler.exe`, compare with the original
    at model level: **13,986 of the 14,026 vanilla scripts (99.71%) come back
-   identical**, and over the whole modded folder **75,101 of 76,592 (98.05%;
+   identical**, and over the whole modded folder **75,125 of 76,593 (98.08%;
    99.0% of those whose dependencies exist at all)**; docs/ROUNDTRIP.md
    explains every class of the rest.
 4. **The analyses the ESL-compaction tooling needs**, with no compiler
@@ -99,7 +99,7 @@ one millisecond per script single-threaded and the rest is creating 14,000
 files (writing the same files as assembly takes 7.5 s); the dependency
 closure of all 77,000 scripts (`closure`) 60 s single-threaded. The checks
 that run Bethesda's compiler take long because each script is a separate
-compiler run (the whole folder: 69 minutes, of which decompiling is 2);
+compiler run (the whole folder: 72 minutes, of which decompiling is 2);
 nothing in the normal workflow calls a compiler.
 
 ## Format notes that matter
