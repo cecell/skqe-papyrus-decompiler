@@ -85,12 +85,21 @@ commands
                                folder) and compare the result with the
                                original at model level
   check --roundtrip <input> --tools <dir> [--import <dir;dir>] [--flags <flg>]
-            [--resolve <dir|bsa>]
+            [--resolve <dir|bsa>] [--per-script-imports]
                                decompile every script, compile the result
                                with PapyrusCompiler.exe (the decompiled set
                                is its own import folder, then --import) and
                                compare with the original at model level;
-                               prints the share that comes back identical
+                               prints the share that comes back identical.
+                               --per-script-imports gives every script its
+                               own import folder holding exactly its
+                               dependency closure, each dependency taken from
+                               the script's own archive first; needed for a
+                               mixed set (mods), where one shared folder
+                               inherits other mods' overrides and name
+                               clashes. Reports incomplete closures before
+                               compiling and compiles byte-identical
+                               duplicates once.
   help
 
   For json and asm, --out is a file for one script and a directory for many
@@ -113,6 +122,7 @@ struct Options {
     bool rewrite = false;
     bool asmCheck = false;
     bool roundtrip = false;
+    bool perScript = false;
     std::string imports;
     std::string flags;
     std::vector<std::string> resolve;
@@ -144,6 +154,7 @@ bool parse(int argc, char** argv, int from, Options& o, const char* cmd) {
         else if (a == "--rewrite") o.rewrite = true;
         else if (a == "--asm") o.asmCheck = true;
         else if (a == "--roundtrip") o.roundtrip = true;
+        else if (a == "--per-script-imports") o.perScript = true;
         else if (a == "--import" && hasNext) o.imports = argv[++i];
         else if (a == "--flags" && hasNext) o.flags = argv[++i];
         else if (a == "--resolve" && hasNext) o.resolve.push_back(argv[++i]);
@@ -632,7 +643,10 @@ int cmd_check(int argc, char** argv) {
     }
     pextool::RoundtripOptions ro;
     if (!collect_resolve(o, ro.resolveItems)) return 2;
-    items = pextool::effective_scripts(items);
+    // One shared source folder cannot hold two scripts of one name; per-script
+    // folders can, and byte-identical copies are compiled once there.
+    if (!o.perScript) items = pextool::effective_scripts(items);
+    ro.perScript = o.perScript;
     ro.tools = fs::u8path(o.tools);
     if (!o.flags.empty()) ro.flags = fs::u8path(o.flags);
     if (!o.work.empty()) ro.work = fs::u8path(o.work);

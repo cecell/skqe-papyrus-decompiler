@@ -63,6 +63,15 @@ public:
         return pos->second.get();
     }
 
+    // The item a name resolves to, or null when the name is not in the set.
+    const Item* item_of(std::string_view name) {
+        std::string key(name);
+        lower_inplace(key);
+        std::lock_guard<std::mutex> lk(m_mu);
+        auto it = m_items.find(key);
+        return it == m_items.end() ? nullptr : &it->second;
+    }
+
     size_t size() const { return m_items.size(); }
 
 private:
