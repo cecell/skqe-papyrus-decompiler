@@ -85,8 +85,16 @@ pex check --roundtrip <input> --tools "<game>\Papyrus Compiler" [--resolve <Data
 ```
 
 `<input>` is a `.pex`, a directory (every `.pex` below it, loose and inside
-every `.bsa`) or one `.bsa`. Work is spread over all cores; the whole Data
-folder decompiles in under a minute. `pex help` has the details.
+every `.bsa`) or one `.bsa`. Work is spread over all cores. `pex help` has
+the details.
+
+Speed (modded Data folder, 77,000 scripts, 32 threads, 2026-11-03): parsing
+everything for `refs` 3.4 s; byte-exact rewrite check 1.3 s; decompiling the
+14,026 vanilla scripts to files 6.8 s, of which the decompiler itself is about
+one millisecond per script single-threaded and the rest is creating 14,000
+files (writing the same files as assembly takes 7.5 s). The checks that run
+Bethesda's compiler take minutes because each script is a separate compiler
+run; nothing in the normal workflow calls a compiler.
 
 ## Format notes that matter
 

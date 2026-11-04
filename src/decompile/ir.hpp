@@ -77,6 +77,8 @@ using StmtPtr = std::unique_ptr<Stmt>;
 struct Stmt {
     StmtKind kind;
     size_t ip = 0;            // first instruction (for diagnostics and line comments)
+    size_t ipEnd = 0;         // If / While: one past the last instruction of the whole statement
+    StrIdx condTemp = 0;      // If / While: the temp the jump tested (0 when the condition was a variable)
     ExprPtr lhs;              // Assign
     ExprPtr rhs;              // Assign / Expr / Return / If cond / While cond / Decl init
     std::vector<StmtPtr> body, elseBody;

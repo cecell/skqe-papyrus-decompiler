@@ -717,7 +717,8 @@ private:
             line(depth, "If " + expr(*st.rhs, 0, false, Context::Condition, ctx) + line_comment(st, ctx));
             for (const StmtPtr& s : st.body) statement(*s, depth + 1, ctx);
             const Stmt* cur = &st;
-            while (cur->elseBody.size() == 1 && cur->elseBody[0]->kind == StmtKind::If) {
+            while (cur->elseBody.size() == 1 && cur->elseBody[0]->kind == StmtKind::If &&
+                   else_if_collapsible(*cur, *cur->elseBody[0], ctx)) {
                 cur = cur->elseBody[0].get();
                 line(depth, "ElseIf " + expr(*cur->rhs, 0, false, Context::Condition, ctx) + line_comment(*cur, ctx));
                 for (const StmtPtr& s : cur->body) statement(*s, depth + 1, ctx);
@@ -735,6 +736,52 @@ private:
             line(depth, "EndWhile");
             break;
         }
+    }
+
+    // ElseIf or a nested If inside Else? The compiled code is the same except
+    // for temp allocation: with ElseIf the outer condition's temp is freed
+    // before the inner condition is evaluated, with a nested If it stays held
+    // until the inner EndIf. So when the outer condition's temp is assigned
+    // anywhere inside the inner If, the source said ElseIf; when it never is,
+    // either reading compiles the same and ElseIf is kept unless a bool temp
+    // with a higher number than the held one was allocated inside, which only
+    // a held temp explains.
+    static bool else_if_collapsible(const Stmt& outer, const Stmt& inner, const Ctx& ctx) {
+        if (outer.condTemp == 0) return true;
+        const Function& f = ctx.c->f;
+        if (inner.ipEnd > f.code.size() || inner.ip >= inner.ipEnd) return true;
+        const std::string outerType = ctx.c->type_of(outer.condTemp);
+        const std::string_view outerName = ctx.c->s.str(outer.condTemp);
+        long long outerNum = -1;
+        if (outerName.size() > 6) outerNum = std::atoll(std::string(outerName.substr(6)).c_str());
+        // The inner condition's instructions end where its first body statement
+        // starts; deeper nested statements hold temps of their own and say
+        // nothing about this pair.
+        size_t condEnd = inner.ipEnd;
+        for (const StmtPtr& s : inner.body) condEnd = std::min(condEnd, s->ip);
+        for (const StmtPtr& s : inner.elseBody) condEnd = std::min(condEnd, s->ip);
+        bool higherAllocated = false;
+        for (size_t ip = inner.ip; ip < inner.ipEnd; ++ip) {
+            const Instruction& ins = f.code[ip];
+            // Destination operand positions (see analysis.cpp dest_operand).
+            int d = -1;
+            switch (ins.op) {
+            case Opcode::CallMethod: case Opcode::CallStatic: case Opcode::PropGet: d = 2; break;
+            case Opcode::CallParent: case Opcode::ArrayFindElement: case Opcode::ArrayRFindElement: d = 1; break;
+            case Opcode::Jmp: case Opcode::JmpT: case Opcode::JmpF: case Opcode::Return: case Opcode::PropSet:
+            case Opcode::ArraySetElement: case Opcode::Nop: d = -1; break;
+            default: d = 0; break;
+            }
+            if (d < 0 || size_t(d) >= ins.args.size() || ins.args[d].type != ValueType::Identifier) continue;
+            const StrIdx dest = ins.args[d].str();
+            if (dest == outer.condTemp) return true;  // reused: it was free: ElseIf
+            if (ip < condEnd && ctx.c->is_temp(dest) && ctx.c->type_of(dest) == outerType) {
+                const std::string_view n = ctx.c->s.str(dest);
+                const long long num = n.size() > 6 ? std::atoll(std::string(n.substr(6)).c_str()) : -1;
+                if (num > outerNum) higherAllocated = true;
+            }
+        }
+        return !higherAllocated;
     }
 
     // --- expressions ----------------------------------------------------------------
@@ -787,6 +834,7 @@ private:
             const std::string to = lower(e.type);
             const std::string from = lower(k.type);
             if (k.kind == ExprKind::Lit && k.lit.type == ValueType::None) return "None";
+            if (k.kind == ExprKind::Var && ctx.c->is_nonevar(k.name)) return "None";  // a read of the None slot
             if (e.implicitCast) return expr(k, parentPrec, rightOperand, Context::Value, ctx);
             // A same-type cast is never inserted by the compiler (the && / ||
             // ones were removed earlier), so it was written and must stay.

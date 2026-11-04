@@ -98,6 +98,8 @@ private:
         if (exitBlock != latch + 1 || exitBlock > hi) fail("loop exit is not right after its latch", h);
         auto w = std::make_unique<Stmt>(StmtKind::While, head.start);
         w->rhs = std::move(head.cond);
+        w->condTemp = head.condTemp;
+        w->ipEnd = m_blocks[latch].end;
         w->body = range(h + 1, latch + 1, head.start);
         out.push_back(std::move(w));
         return latch + 1;
@@ -111,6 +113,8 @@ private:
         Block& thenLast = m_blocks[fIdx - 1];
         auto st = std::make_unique<Stmt>(StmtKind::If, b.start);
         st->rhs = std::move(b.cond);
+        st->condTemp = b.condTemp;
+        st->ipEnd = thenLast.end;
         if (thenLast.term == Term::Fall || (thenLast.term == Term::Jump && thenLast.target <= thenLast.start)) {
             // Bethesda's compiler always jumps to the end label; other
             // compilers leave the jump out when it would go to the next
@@ -130,6 +134,7 @@ private:
         }
         const size_t jIdx = block_at(j);
         if (jIdx <= fIdx || jIdx > hi) fail("If end label is not after the else-range", fIdx - 1);
+        st->ipEnd = m_blocks[jIdx - 1].end;
         st->body = range(bi + 1, fIdx, j);
         st->elseBody = range(fIdx, jIdx, j);
         out.push_back(std::move(st));
