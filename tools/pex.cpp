@@ -6,6 +6,7 @@
 #include "inputs.hpp"
 #include "papyrus/analysis.hpp"
 #include "papyrus/assemble.hpp"
+#include "papyrus/audit.hpp"
 #include "papyrus/canon.hpp"
 #include "papyrus/compile.hpp"
 #include "papyrus/decompile.hpp"
@@ -26,6 +27,7 @@
 #include <iterator>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -78,6 +80,19 @@ commands
                                events; with --vanilla, the calls vanilla does
                                not declare (what the script needs an extender
                                for)
+  audit <input> [--resolve <dir|bsa>] [--json|--csv] [--rules]
+                               static risks for script authors: loops that
+                               cannot end or spin without Wait, update timers
+                               never unregistered or re-armed without a stop,
+                               calls on results that can be None, recursion,
+                               off-by-one array loops, GotoState to a state
+                               that does not exist, arrays used before they
+                               exist (docs/AUDIT.md). One line per finding
+                               with file, function, source line, rule and
+                               advice; a summary by rule at the end (--quiet:
+                               the summary alone). --rules lists the rules.
+                               --resolve supplies the other scripts
+                               (inherited states, declared types).
   closure <script.pex> --data <Data> [--import <dir;dir>] [--emit <dir>] [--json]
                                walks every script the script needs, through
                                compiled files in --data; reports each as
@@ -177,6 +192,7 @@ struct Options {
     std::string map;
     std::string callees;
     bool csv = false;
+    bool rules = false;
     bool dryRun = false;
     bool backup = false;
     bool comments = false;
@@ -214,6 +230,7 @@ bool parse(int argc, char** argv, int from, Options& o, const char* cmd) {
         else if (a == "--map" && hasNext) o.map = argv[++i];
         else if (a == "--callee" && hasNext) o.callees = argv[++i];
         else if (a == "--csv") o.csv = true;
+        else if (a == "--rules") o.rules = true;
         else if (a == "--dry-run") o.dryRun = true;
         else if (a == "--backup") o.backup = true;
         else if (a == "--comments") o.comments = true;
@@ -1424,6 +1441,87 @@ int cmd_deps(int argc, char** argv) {
     return failures ? 1 : 0;
 }
 
+// --- audit ----------------------------------------------------------------
+
+int cmd_audit(int argc, char** argv) {
+    Options o;
+    if (!parse(argc, argv, 2, o, "audit")) return 2;
+    if (o.rules) {
+        for (const pex::AuditRule& r : pex::audit_rules()) std::printf("%-38s %-8s %s\n", r.id.c_str(), pex::to_string(r.severity), r.summary.c_str());
+        return 0;
+    }
+    std::vector<pextool::Item> items;
+    if (!collect(o, items)) return 2;
+    std::vector<pextool::Item> extra;
+    if (!collect_resolve(o, extra)) return 2;
+    pextool::ItemResolver resolver;
+    resolver.add(extra);
+    resolver.add(items);
+    pex::AuditOptions aopt;
+    aopt.resolver = &resolver;
+    struct RuleTally {
+        size_t findings = 0, scripts = 0;
+    };
+    std::map<std::string, RuleTally> byRule;
+    std::vector<std::string> rows(items.size());
+    std::atomic<int> failures{0};
+    std::atomic<size_t> functions{0}, skipped{0}, findings{0}, scriptsWithFindings{0};
+    std::mutex mu;
+    const auto t0 = std::chrono::steady_clock::now();
+    pextool::for_each_parallel(items, o.threads, [&](size_t i, const pextool::Item& it, pextool::Loader& ld) {
+        pex::Script s;
+        if (!load_script(it, ld, s, mu)) {
+            ++failures;
+            return;
+        }
+        const pex::AuditResult r = pex::audit(s, aopt);
+        functions += r.functions;
+        skipped += r.skipped;
+        findings += r.findings.size();
+        if (!r.findings.empty()) ++scriptsWithFindings;
+        std::string text;
+        std::set<std::string> rulesHere;
+        for (const pex::Finding& f : r.findings) {
+            rulesHere.insert(f.rule);
+            const std::string fn = f.object + (f.state.empty() ? "" : "[" + f.state + "]") + "." + f.function;
+            const std::string line = f.line ? std::to_string(f.line) : std::string("?");
+            if (o.json) {
+                text += "{\"file\":" + json_str(it.label) + ",\"object\":" + json_str(f.object) + ",\"state\":" + json_str(f.state) +
+                        ",\"function\":" + json_str(f.function) + ",\"ip\":" + std::to_string(f.ip) + ",\"line\":" + std::to_string(f.line) +
+                        ",\"severity\":\"" + pex::to_string(f.severity) + "\",\"rule\":" + json_str(f.rule) + ",\"message\":" + json_str(f.message) + "}\n";
+            } else if (o.csv) {
+                text += csv_str(it.label) + "," + csv_str(f.object) + "," + csv_str(f.state) + "," + csv_str(f.function) + "," + std::to_string(f.ip) + "," +
+                        std::to_string(f.line) + "," + pex::to_string(f.severity) + "," + csv_str(f.rule) + "," + csv_str(f.message) + "\n";
+            } else {
+                const char sev = f.severity == pex::Severity::Error ? 'E' : f.severity == pex::Severity::Warning ? 'W' : 'I';
+                text += it.label + "  " + fn + "  line " + line + "  [" + sev + "] " + f.rule + "  " + f.message + "\n";
+            }
+        }
+        rows[i] = std::move(text);
+        std::lock_guard<std::mutex> lk(mu);
+        for (const pex::Finding& f : r.findings) ++byRule[f.rule].findings;
+        for (const std::string& rule : rulesHere) ++byRule[rule].scripts;
+    });
+    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    if (o.csv) std::fputs("file,object,state,function,ip,line,severity,rule,message\n", stdout);
+    if (!o.quiet || o.json || o.csv) {
+        for (const std::string& r : rows) std::fputs(r.c_str(), stdout);
+    }
+    if (!o.json && !o.csv && !byRule.empty()) {
+        std::fputs("\nfindings by rule (count, scripts):\n", stdout);
+        for (const pex::AuditRule& rule : pex::audit_rules()) {
+            auto it = byRule.find(rule.id);
+            if (it == byRule.end()) continue;
+            std::fprintf(stdout, "  %-38s %-8s %7zu %7zu\n", rule.id.c_str(), pex::to_string(rule.severity), it->second.findings, it->second.scripts);
+        }
+    }
+    if (items.size() > 1 || o.quiet) {
+        std::fprintf(stderr, "scripts %zu (%zu with findings)  functions %zu  skipped %zu  findings %zu  %.1fs\n", items.size(),
+                     scriptsWithFindings.load(), functions.load(), skipped.load(), findings.load(), secs);
+    }
+    return failures ? 1 : 0;
+}
+
 int cmd_closure(int argc, char** argv) {
     Options o;
     if (!parse(argc, argv, 2, o, "closure")) return 2;
@@ -1656,6 +1754,7 @@ int main(int argc, char** argv_) {
     if (cmd == "decompile") return cmd_decompile(argc, argv.data());
     if (cmd == "refs") return cmd_refs(argc, argv.data());
     if (cmd == "deps") return cmd_deps(argc, argv.data());
+    if (cmd == "audit") return cmd_audit(argc, argv.data());
     if (cmd == "closure") return cmd_closure(argc, argv.data());
     if (cmd == "patch") return cmd_patch(argc, argv.data());
     if (cmd == "check") return cmd_check(argc, argv.data());

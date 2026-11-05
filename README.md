@@ -43,6 +43,17 @@ script on a modded machine, and the numbers are in the docs. What it does:
    `patch --map` renumbers them in the compiled file, `closure` tells whether
    everything a script needs is present before anyone tries to compile it,
    `deps` says what a script needs an extender for.
+6. **A script auditor** (`pex audit`): twelve rules over the decompiler's
+   view of a script that tell authors where it can misbehave at run time:
+   loops that cannot end or spin without a `Wait`, update timers never
+   unregistered or re-armed without a stop, calls on results that can be None
+   (`GetFormFromFile` first of all), recursion, arrays used before they
+   exist, `GotoState` to a state that does not exist. Grounded in what the
+   save games and the Papyrus logs on this machine actually show, and
+   measured: 168 findings in 119 of the 14,026 vanilla scripts (every class
+   inspected, Bethesda's own spin loops and undeclared states among them),
+   3,815 in 1,215 of the 77,047 scripts of the modded folder, in 1.1 s.
+   [docs/AUDIT.md](docs/AUDIT.md) explains every rule in plain language.
 
 ## Use
 
@@ -93,6 +104,10 @@ pex decompile <input> [--out <path>] [--resolve <Data>]
                                  other scripts (parent chains, declarations)
 pex refs <input> [--csv]         FormID literals and their plugin names
 pex deps <input> [--resolve <Data>] [--vanilla <Misc.bsa>]
+pex audit <input> [--resolve <Data>] [--json|--csv] [--rules]
+                                 risks for script authors, one line per finding
+                                 (file, function, source line, rule, advice) and
+                                 a summary by rule; docs/AUDIT.md
 pex closure <script.pex> --data <Data> [--import <dirs>] [--emit <dir>]
 pex patch <input> --map <FormIDMap> [--dry-run] [--backup]
 pex check --rewrite <input>      read + write, compare byte for byte
@@ -113,7 +128,9 @@ assembling and comparing all 77,000 (`check --assemble`) 2.7 s; decompiling the
 14,026 vanilla scripts to files 6.8 s, of which the decompiler itself is about
 one millisecond per script single-threaded and the rest is creating 14,000
 files (writing the same files as assembly takes 7.5 s); the dependency
-closure of all 77,000 scripts (`closure`) 60 s single-threaded. The checks
+closure of all 77,000 scripts (`closure`) 60 s single-threaded; auditing all
+77,047 scripts (`audit`, 321,124 function bodies lifted and structured) 1.1 s,
+the 14,026 vanilla ones 0.1 s (0.4 s on one thread). The checks
 that run Bethesda's compiler take long because each script is a separate
 compiler run (the whole folder: 72 minutes, of which decompiling is 2);
 nothing in the normal workflow calls a compiler.
@@ -142,13 +159,15 @@ of the build. Elsewhere: `cmake -B build && cmake --build build && ctest --test-
 ```
 include/papyrus/   pex.hpp (model, read/write, views), canon.hpp (comparison),
                    layout.hpp (source order), assemble.hpp (assembler),
-                   compile.hpp (compiler), decompile.hpp, analysis.hpp
+                   compile.hpp (compiler), decompile.hpp, analysis.hpp,
+                   audit.hpp (the script auditor)
 src/               reader, writer, JSON, assembly writer and assembler, canon,
-                   layout, analysis, decompile/ (lift, structure, psc_writer,
-                   event_names.inc), compile/ (lexer, parser, interfaces,
-                   lowering, codegen)
+                   layout, analysis, audit (the rules), decompile/ (lift,
+                   structure, psc_writer, event_names.inc/.hpp), compile/
+                   (lexer, parser, interfaces, lowering, codegen)
 tools/             pex.cpp (CLI), inputs.hpp, process.hpp, resolver.hpp,
-                   roundtrip.hpp, gen_event_names.py
+                   roundtrip.hpp, gen_event_names.py, resaver/ (DumpStacks:
+                   the Papyrus VM state of a save game, through ReSaver)
 tests/             unit tests on synthetic scripts, fuzz target
 probes/            Papyrus sources compiled to learn the compiler's patterns
 docs/              format, assembly syntax, compiler catalog, design, round trip
