@@ -4,13 +4,17 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "papyrus/analysis.hpp"
 #include "papyrus/assemble.hpp"
+#include "papyrus/audit.hpp"
 #include "papyrus/canon.hpp"
+#include "papyrus/compile.hpp"
 #include "papyrus/decompile.hpp"
 #include "papyrus/pex.hpp"
 #include "compile/dotnet_hashtable.hpp"
 
+#include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -982,6 +986,264 @@ static void write_seeds(const fs::path& dir) {
     }
 }
 
+// --- audit --------------------------------------------------------------------
+// Each rule on a hand-written Papyrus source compiled with our own compiler
+// against stub declarations, so the test reads like the author's script.
+
+namespace {
+struct MapResolver : papyrus::psc::SourceResolver {
+    std::map<std::string, std::string> sources;  // lowercased name -> text
+    bool find(std::string_view name, papyrus::psc::SourceFile& out) override {
+        std::string key(name);
+        for (char& ch : key) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        auto it = sources.find(key);
+        if (it == sources.end()) return false;
+        out.name = std::string(name);
+        out.path = out.name + ".psc";
+        out.text = it->second;
+        return true;
+    }
+};
+
+bool compile_sample(MapResolver& r, const std::string& name, Script& out) {
+    papyrus::psc::SourceFile src;
+    CHECK(r.find(name, src));
+    papyrus::psc::CompileOptions opt;
+    opt.resolver = &r;
+    std::vector<papyrus::psc::Diagnostic> diags;
+    const bool ok = papyrus::psc::compile(src, opt, out, diags);
+    if (!ok) {
+        for (const papyrus::psc::Diagnostic& d : diags) std::fprintf(stderr, "  %s\n", d.text().c_str());
+    }
+    return ok;
+}
+}  // namespace
+
+static void test_audit() {
+    MapResolver r;
+    r.sources["scriptobject"] = R"(Scriptname ScriptObject
+Function RegisterForUpdate(float afInterval) native
+Function RegisterForSingleUpdate(float afInterval) native
+Function UnregisterForUpdate() native
+Function RegisterForUpdateGameTime(float afInterval) native
+Function UnregisterForUpdateGameTime() native
+Function GotoState(string asNewState) native
+string Function GetState() native
+Event OnUpdate()
+EndEvent
+Event OnInit()
+EndEvent
+)";
+    r.sources["form"] = "Scriptname Form extends ScriptObject\n";
+    r.sources["objectreference"] = R"(Scriptname ObjectReference extends Form
+Location Function GetCurrentLocation() native
+Event OnActivate(ObjectReference akActionRef)
+EndEvent
+)";
+    r.sources["location"] = "Scriptname Location extends Form\nbool Function IsCleared() native\n";
+    r.sources["quest"] = "Scriptname Quest extends Form\nbool Function Start() native\nFunction Stop() native\n";
+    r.sources["formlist"] = "Scriptname FormList extends Form\nFunction AddForm(Form apForm) native\n";
+    r.sources["utility"] = "Scriptname Utility\nFunction Wait(float afSeconds) native global\n";
+    r.sources["game"] = "Scriptname Game\nForm Function GetFormFromFile(int aiFormID, string asFilename) native global\nint Function GetModByName(string asName) native global\n";
+    r.sources["auditsample"] = R"(Scriptname AuditSample extends ObjectReference
+
+Int[] neverCreated
+Form[] created
+Bool done
+Int counter
+
+Function LoopNoExit(Int n)
+    While n > 0
+        counter += 1
+    EndWhile
+EndFunction
+
+Function LoopCounted(Int n)
+    While n > 0
+        n -= 1
+    EndWhile
+EndFunction
+
+Function LoopPolls()
+    While !done
+    EndWhile
+EndFunction
+
+Function LoopPollsWithWait()
+    While !done
+        Utility.Wait(1.0)
+    EndWhile
+EndFunction
+
+Function Forever()
+    While True
+        Utility.Wait(1.0)
+    EndWhile
+EndFunction
+
+Event OnInit()
+    RegisterForUpdate(0.05)
+EndEvent
+
+Event OnUpdate()
+    Utility.Wait(0.5)
+    RegisterForSingleUpdate(1.0)
+EndEvent
+
+Function NoneDeref()
+    Quest q = Game.GetFormFromFile(0x800, "Other.esp") as Quest
+    q.Start()
+EndFunction
+
+Function NoneDerefChecked()
+    Quest q = Game.GetFormFromFile(0x800, "Other.esp") as Quest
+    If q
+        q.Start()
+    EndIf
+EndFunction
+
+Function NoneDerefModChecked()
+    If Game.GetModByName("Other.esp") != 255
+        Quest q = Game.GetFormFromFile(0x800, "Other.esp") as Quest
+        q.Start()
+    EndIf
+EndFunction
+
+Function NoneArg(FormList list)
+    list.AddForm(Game.GetFormFromFile(0x801, "Other.esp"))
+EndFunction
+
+Function NoneLocation()
+    Location here = GetCurrentLocation()
+    done = here.IsCleared()
+EndFunction
+
+Function Recurse(Int n)
+    Recurse(n + 1)
+EndFunction
+
+Function RecurseGuarded(Int n)
+    If n <= 0
+        Return
+    EndIf
+    RecurseGuarded(n - 1)
+EndFunction
+
+Function OffByOne(Int[] a)
+    Int i = 0
+    While i <= a.Length
+        counter += a[i]
+        i += 1
+    EndWhile
+EndFunction
+
+Function ArrayNoneLocal()
+    Form[] items
+    If items.Length > 0
+        done = True
+    EndIf
+EndFunction
+
+Function ArrayNoneVar()
+    counter = neverCreated[0]
+    created = new Form[2]
+    counter += created.Length
+EndFunction
+)";
+    r.sources["auditstates"] = R"(Scriptname AuditStates extends ObjectReference
+
+Event OnActivate(ObjectReference akActionRef)
+    GotoState("Busy")
+    OnActivate(akActionRef)
+    GotoState("Bussy")
+    GotoState("None")
+    If GetState() == "Flag"
+        GotoState("Flag")
+    EndIf
+EndEvent
+
+State Busy
+    Event OnActivate(ObjectReference akActionRef)
+        GotoState("")
+    EndEvent
+EndState
+
+Event OnUpdate()
+    RegisterForSingleUpdate(1.0)
+EndEvent
+)";
+
+    struct Resolver : ScriptResolver {
+        std::map<std::string, const Script*> scripts;
+        const Script* find(std::string_view name) override {
+            std::string key(name);
+            for (char& ch : key) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            auto it = scripts.find(key);
+            return it == scripts.end() ? nullptr : it->second;
+        }
+    } resolver;
+    Script sample, states, objectReference, form, scriptObject;
+    CHECK(compile_sample(r, "AuditSample", sample));
+    CHECK(compile_sample(r, "AuditStates", states));
+    CHECK(compile_sample(r, "ObjectReference", objectReference));
+    CHECK(compile_sample(r, "Form", form));
+    CHECK(compile_sample(r, "ScriptObject", scriptObject));
+    resolver.scripts["objectreference"] = &objectReference;
+    resolver.scripts["form"] = &form;
+    resolver.scripts["scriptobject"] = &scriptObject;
+    AuditOptions opt;
+    opt.resolver = &resolver;
+
+    auto has = [](const AuditResult& res, const char* fn, const char* rule) {
+        for (const Finding& f : res.findings) {
+            if (f.function == fn && f.rule == rule) return true;
+        }
+        return false;
+    };
+    auto count = [](const AuditResult& res, const char* fn) {
+        size_t n = 0;
+        for (const Finding& f : res.findings) n += f.function == fn;
+        return n;
+    };
+
+    const AuditResult a = audit(sample, opt);
+    CHECK(a.skipped == 0);
+    CHECK(has(a, "LoopNoExit", "loop-no-exit"));
+    CHECK(count(a, "LoopCounted") == 0);
+    CHECK(has(a, "LoopPolls", "loop-polls-without-wait"));
+    CHECK(count(a, "LoopPollsWithWait") == 0);
+    CHECK(count(a, "Forever") == 0);
+    CHECK(has(a, "OnInit", "update-interval-too-short"));
+    CHECK(has(a, "OnInit", "update-never-unregistered"));
+    CHECK(has(a, "OnUpdate", "wait-in-onupdate"));
+    CHECK(has(a, "OnUpdate", "onupdate-reregisters-unconditionally"));
+    CHECK(has(a, "NoneDeref", "none-deref-unchecked"));
+    CHECK(count(a, "NoneDerefChecked") == 0);
+    CHECK(count(a, "NoneDerefModChecked") == 0);
+    CHECK(has(a, "NoneArg", "none-deref-unchecked"));
+    CHECK(has(a, "NoneLocation", "none-deref-unchecked"));
+    CHECK(has(a, "Recurse", "recursion-unconditional"));
+    CHECK(has(a, "RecurseGuarded", "recursion"));
+    CHECK(!has(a, "RecurseGuarded", "recursion-unconditional"));
+    CHECK(has(a, "OffByOne", "array-index-off-by-one"));
+    CHECK(has(a, "ArrayNoneLocal", "array-none"));
+    CHECK(has(a, "ArrayNoneVar", "array-none"));
+    CHECK(count(a, "ArrayNoneVar") == 1);
+    // Our compiler writes debug info: every finding has a source line.
+    for (const Finding& f : a.findings) CHECK(f.line > 0);
+
+    const AuditResult b = audit(states, opt);
+    CHECK(b.skipped == 0);
+    CHECK(has(b, "OnActivate", "gotostate-unknown"));
+    CHECK(!has(b, "OnActivate", "recursion"));
+    CHECK(!has(b, "OnActivate", "recursion-unconditional"));
+    size_t unknownStates = 0;
+    for (const Finding& f : b.findings) unknownStates += f.rule == "gotostate-unknown";
+    CHECK(unknownStates == 1);  // "Bussy" only: "None" and the GetState flag "Flag" are not reported
+    CHECK(count(b, "OnUpdate") == 0);  // the script has GotoState, so the re-arm has an exit
+    CHECK(audit_rules().size() == 12);
+}
+
 int main(int argc, char** argv) {
     if (argc == 3 && std::strcmp(argv[1], "--seeds") == 0) {
         write_seeds(argv[2]);
@@ -996,6 +1258,7 @@ int main(int argc, char** argv) {
     test_assemble();
     test_elseif_rule();
     test_dotnet_hashtable_order();
+    test_audit();
     if (g_failures) {
         std::fprintf(stderr, "%d failure(s)\n", g_failures);
         return 1;
