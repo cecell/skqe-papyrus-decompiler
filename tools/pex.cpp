@@ -80,7 +80,7 @@ commands
                                events; with --vanilla, the calls vanilla does
                                not declare (what the script needs an extender
                                for)
-  audit <input> [--resolve <dir|bsa>] [--json|--csv] [--rules]
+  audit <input> [--resolve <dir|bsa>] [--json|--csv] [--rules] [--all-copies]
                                static risks for script authors: loops that
                                cannot end or spin without Wait, update timers
                                never unregistered or re-armed without a stop,
@@ -92,7 +92,9 @@ commands
                                advice; a summary by rule at the end (--quiet:
                                the summary alone). --rules lists the rules.
                                --resolve supplies the other scripts
-                               (inherited states, declared types).
+                               (inherited states, declared types). Audits the
+                               copy the game loads of each script (loose
+                               beats archive); --all-copies audits every file.
   closure <script.pex> --data <Data> [--import <dir;dir>] [--emit <dir>] [--json]
                                walks every script the script needs, through
                                compiled files in --data; reports each as
@@ -183,6 +185,7 @@ struct Options {
     std::string pexInput;
     bool roundtrip = false;
     bool perScript = false;
+    bool allCopies = false;
     std::string imports;
     std::string flags;
     std::vector<std::string> resolve;
@@ -221,6 +224,7 @@ bool parse(int argc, char** argv, int from, Options& o, const char* cmd) {
         else if (a == "--pex" && hasNext) o.pexInput = argv[++i];
         else if (a == "--roundtrip") o.roundtrip = true;
         else if (a == "--per-script-imports") o.perScript = true;
+        else if (a == "--all-copies") o.allCopies = true;
         else if (a == "--import" && hasNext) o.imports = argv[++i];
         else if (a == "--flags" && hasNext) o.flags = argv[++i];
         else if (a == "--resolve" && hasNext) o.resolve.push_back(argv[++i]);
@@ -1452,6 +1456,9 @@ int cmd_audit(int argc, char** argv) {
     }
     std::vector<pextool::Item> items;
     if (!collect(o, items)) return 2;
+    // The game loads one copy of each script (loose beats archive); audit that
+    // one unless every copy is wanted.
+    if (!o.allCopies) items = pextool::effective_scripts(items);
     std::vector<pextool::Item> extra;
     if (!collect_resolve(o, extra)) return 2;
     pextool::ItemResolver resolver;

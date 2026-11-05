@@ -52,7 +52,9 @@ script on a modded machine, and the numbers are in the docs. What it does:
    save games and the Papyrus logs on this machine actually show, and
    measured: 168 findings in 119 of the 14,026 vanilla scripts (every class
    inspected, Bethesda's own spin loops and undeclared states among them),
-   3,815 in 1,215 of the 77,047 scripts of the modded folder, in 1.1 s.
+   3,428 in 1,066 of the 73,690 scripts the game would load from the modded
+   folder (the winning copy of each; `--all-copies` audits all 77,047 files:
+   3,815 in 1,215), in 1.1 s.
    [docs/AUDIT.md](docs/AUDIT.md) explains every rule in plain language.
 
 ## Use
@@ -129,7 +131,7 @@ assembling and comparing all 77,000 (`check --assemble`) 2.7 s; decompiling the
 one millisecond per script single-threaded and the rest is creating 14,000
 files (writing the same files as assembly takes 7.5 s); the dependency
 closure of all 77,000 scripts (`closure`) 60 s single-threaded; auditing all
-77,047 scripts (`audit`, 321,124 function bodies lifted and structured) 1.1 s,
+77,047 script files (`audit --all-copies`, 321,124 function bodies lifted and structured) 1.1 s,
 the 14,026 vanilla ones 0.1 s (0.4 s on one thread). The checks
 that run Bethesda's compiler take long because each script is a separate
 compiler run (the whole folder: 72 minutes, of which decompiling is 2);
