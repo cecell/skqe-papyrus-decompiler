@@ -246,8 +246,11 @@ public:
 
     bool find(std::string_view scriptName, SourceFile& out) override {
         const std::string key = lower(scriptName) + ".psc";
+        if (m_listings.size() < m_folders.size()) {
+            m_listings.resize(m_folders.size());
+            m_listed.resize(m_folders.size(), false);
+        }
         for (size_t i = 0; i < m_folders.size(); ++i) {
-            if (i >= m_listings.size()) m_listings.resize(i + 1);
             if (!m_listed[i]) list(i);
             auto it = m_listings[i].find(key);
             if (it == m_listings[i].end()) continue;
@@ -273,7 +276,6 @@ public:
 
 private:
     void list(size_t i) {
-        m_listed.resize(std::max(m_listed.size(), i + 1), false);
         m_listed[i] = true;
         std::error_code ec;
         for (const fs::directory_entry& e : fs::directory_iterator(m_folders[i], ec)) {

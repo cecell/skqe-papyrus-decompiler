@@ -99,9 +99,12 @@ commands
                                folder) and compare the result with the
                                original at model level
   compile <psc|dir> [--import <dir;dir>] [--flags <flg>] [--out <dir>] [--declarations]
+            [--resolve <dir|bsa>]
                                our compiler: .psc to .pex (the source's own
-                               folder is always an import folder); with
-                               --declarations every function body is left empty
+                               folder is always an import folder; a dependency
+                               without source is taken from its compiled file
+                               in --resolve); with --declarations every
+                               function body is left empty
   check --parse <SourceDir>    parse every .psc below the folder with the compiler
                                front end; lists the files it cannot parse
   check --compile <SourceDir> --pex <input> [--import <dir;dir>] [--flags <flg>]
@@ -906,6 +909,45 @@ CompileSetup compile_setup(const Options& o, const std::vector<fs::path>& source
     return s;
 }
 
+// Sources from folders first; a script with no source but a compiled file in
+// the given items is served as a declaration stub decompiled from it
+// (`DecompileOptions::declarationsOnly`, every parameter with a default, as
+// the round trip's import sets are made). Bethesda's compiler cannot do this;
+// it lets the oracle cover scripts whose dependencies ship without source.
+class CompiledFallbackResolver : public psc::SourceResolver {
+public:
+    CompiledFallbackResolver(std::unique_ptr<psc::SourceResolver> folders, const std::vector<pextool::Item>& items,
+                             const std::map<std::string, size_t>& byStem)
+        : m_folders(std::move(folders)), m_items(items), m_byStem(byStem) {}
+
+    bool find(std::string_view scriptName, psc::SourceFile& out) override {
+        if (m_folders->find(scriptName, out)) return true;
+        auto it = m_byStem.find(lower_ascii(std::string(scriptName)));
+        if (it == m_byStem.end()) return false;
+        const pextool::Item& item = m_items[it->second];
+        std::vector<uint8_t> bytes;
+        std::string err;
+        pex::Script s;
+        if (!m_loader.load(item, bytes, err) || pex::read(bytes.data(), bytes.size(), s, &err) != pex::Status::Ok) return false;
+        if (s.objects.empty()) return false;
+        pex::DecompileOptions d;
+        d.declarationsOnly = true;
+        d.optionalObjectParams = true;
+        const pex::DecompileResult r = pex::decompile(s, d);
+        out.name = std::string(s.str(s.objects[0].name));
+        out.path = item.label;
+        out.text = r.source;
+        out.modified = 0;
+        return true;
+    }
+
+private:
+    std::unique_ptr<psc::SourceResolver> m_folders;
+    const std::vector<pextool::Item>& m_items;
+    const std::map<std::string, size_t>& m_byStem;
+    pextool::Loader m_loader;
+};
+
 psc::SourceFile read_source(const fs::path& p) {
     psc::SourceFile src;
     std::ifstream f(p, std::ios::binary);
@@ -942,6 +984,14 @@ int cmd_compile(int argc, char** argv) {
     }
     if (toDir) fs::create_directories(fs::u8path(o.out), ec);
     std::unique_ptr<psc::SourceResolver> resolver = psc::folder_resolver(setup.imports);
+    std::vector<pextool::Item> compiled;
+    std::map<std::string, size_t> compiledByStem;
+    if (!o.resolve.empty()) {
+        if (!collect_resolve(o, compiled)) return 2;
+        compiled = pextool::effective_scripts(compiled);
+        for (size_t i = 0; i < compiled.size(); ++i) compiledByStem[lower_ascii(fs::path(compiled[i].name).stem().string())] = i;
+        resolver = std::make_unique<CompiledFallbackResolver>(std::move(resolver), compiled, compiledByStem);
+    }
     psc::CompileOptions co;
     co.flags = setup.flags;
     co.resolver = resolver.get();
@@ -1006,7 +1056,8 @@ int check_compile(const Options& o) {
     for (unsigned t = 0; t < threads; ++t) {
         pool.emplace_back([&] {
             pextool::Loader ld;
-            std::unique_ptr<psc::SourceResolver> resolver = psc::folder_resolver(setup.imports);
+            std::unique_ptr<psc::SourceResolver> resolver =
+                std::make_unique<CompiledFallbackResolver>(psc::folder_resolver(setup.imports), items, byStem);
             psc::CompileOptions co;
             co.flags = setup.flags;
             co.resolver = resolver.get();

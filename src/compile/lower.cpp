@@ -4,6 +4,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "lower.hpp"
 
+#include "codegen.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <map>
@@ -18,11 +20,6 @@ using pex::Instruction;
 using pex::Opcode;
 using pex::StrIdx;
 using pex::Value;
-
-struct LowerError {
-    int line;
-    std::string message;
-};
 
 class Lowerer {
 public:
@@ -153,22 +150,48 @@ private:
         for (const Property& p : m_ast.properties) property(o, p);
 
         // The default state: the generated GetState / GotoState, then the
-        // script's own functions.
+        // script's own functions. Bodies are compiled in source order across
+        // state blocks (temps are numbered in that order: vanilla
+        // BlackreachLockScript's SetOpen, declared after its state blocks,
+        // starts at ::temp5).
         pex::State def;
         def.name = intern("");
         generated_state_functions(def);
-        for (const Function& f : m_ast.functions) def.functions.push_back(function(f, def.name, true));
-        o.states.push_back(std::move(def));
-        for (const State& st : m_ast.states) {
-            pex::State ps;
-            ps.name = intern(st.name);
-            bool first = true;
-            for (const Function& f : st.functions) {
-                ps.functions.push_back(function(f, first ? ps.name : intern(""), true));
-                first = false;
-            }
-            o.states.push_back(std::move(ps));
+        std::vector<pex::State> states(m_ast.states.size());
+        for (size_t i = 0; i < m_ast.states.size(); ++i) {
+            // The compiler's listing writes state names lowercased; a literal
+            // spelled like a state merges to that spelling when the state
+            // block precedes it in the compiler's (hash-ordered) listing,
+            // which is not reproduced here (docs/COMPILER_PATTERNS.md).
+            states[i].name = intern(lower(m_ast.states[i].name));
         }
+        for (const auto& [kind, index] : m_ast.order) {
+            if (kind == 2) {
+                def.functions.push_back(function(m_ast.functions[index], def.name, false));
+                m_pendingRecords.push_back({0, def.name, def.functions.back().name, m_lines});
+            } else if (kind == 3) {
+                const State& st = m_ast.states[index];
+                pex::State& ps = states[index];
+                bool first = true;
+                for (const Function& f : st.functions) {
+                    ps.functions.push_back(function(f, first ? ps.name : intern(""), false));
+                    m_pendingRecords.push_back({index + 1, first ? ps.name : intern(""), ps.functions.back().name, m_lines});
+                    first = false;
+                }
+            }
+        }
+        o.states.push_back(std::move(def));
+        for (pex::State& ps : states) o.states.push_back(std::move(ps));
+        // Debug records in the compiler's listing order: accessors (already
+        // recorded), the default state's functions, then the other states.
+        // The merge of same-named records ("last lines win", the label bug)
+        // depends on this order, not on source order.
+        for (size_t block = 0; block <= m_ast.states.size(); ++block) {
+            for (Pending& r : m_pendingRecords) {
+                if (r.block == block) record(r.label, r.name, pex::FunctionKind::Method, std::move(r.lines));
+            }
+        }
+        m_pendingRecords.clear();
         m_s.objects.push_back(std::move(o));
     }
 
@@ -231,9 +254,7 @@ private:
 
     pex::Function accessor(const Function& f, StrIdx propName, pex::FunctionKind kind) {
         pex::NamedFunction nf = function(f, intern(""), false);
-        std::vector<uint16_t> lines;
-        for (size_t i = 0; i < nf.body.code.size(); ++i) lines.push_back(m_lines.size() > i ? m_lines[i] : 0);
-        record(intern(""), propName, kind, std::move(lines));
+        record(intern(""), propName, kind, m_lines);
         return std::move(nf.body);
     }
 
@@ -254,15 +275,27 @@ private:
             pf.params.push_back(pp);
         }
         m_lines.clear();
-        if (!f.isNative && !m_opt.declarationsOnly) body(f, pf);
+        if (!f.isNative && !m_opt.declarationsOnly) {
+            ObjectContext ctx{m_s, m_prog, m_info, [this](std::string_view t) { return intern(t); }, m_tempCounter};
+            // A property accessor is not in the interface: describe it here.
+            FuncInfo own;
+            const FuncInfo* fi = m_info.own_function(f.name);
+            if (!fi || fi->ast != &f) {
+                own.name = f.name;
+                own.ret = TypeRef::of(f.returnType);
+                for (const Param& p : f.params) {
+                    ParamInfo pi;
+                    pi.name = p.name;
+                    pi.type = TypeRef::of(p.type);
+                    own.params.push_back(pi);
+                }
+                fi = &own;
+            }
+            compile_body(ctx, f, *fi, pf, m_lines);
+            m_tempCounter = ctx.tempCounter;
+        }
         if (withRecord) record(label, nf.name, pex::FunctionKind::Method, m_lines);
         return nf;
-    }
-
-    // Function bodies: the next milestone. Until then a body stays empty.
-    void body(const Function& f, pex::Function& pf) {
-        (void)pf;
-        if (!f.body.empty()) m_bodiesSkipped = true;
     }
 
     void generated_state_functions(pex::State& def) {
@@ -337,6 +370,13 @@ private:
     std::unordered_map<std::string, StrIdx> m_interned;
     std::map<std::tuple<StrIdx, StrIdx, int>, size_t> m_records;
     std::vector<uint16_t> m_lines;  // debug lines of the function being compiled
+    struct Pending {
+        size_t block;  // 0 = the default state, i + 1 = states[i]
+        StrIdx label, name;
+        std::vector<uint16_t> lines;
+    };
+    std::vector<Pending> m_pendingRecords;
+    int m_tempCounter = 0;          // ::tempN numbering, one counter per object
     bool m_bodiesSkipped = false;
 };
 

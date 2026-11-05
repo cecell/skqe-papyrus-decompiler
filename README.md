@@ -31,7 +31,11 @@ script on a modded machine, and the numbers are in the docs. What it does:
    identical**, and over the whole modded folder **75,125 of 76,593 (98.08%;
    99.0% of those whose dependencies exist at all)**; docs/ROUNDTRIP.md
    explains every class of the rest.
-4. **The analyses the ESL-compaction tooling needs**, with no compiler
+4. **A compiler** for Skyrim's Papyrus (`pex compile`), proved by compiling
+   every vanilla source and comparing with the shipped compiled file at
+   model level: **13,372 of 13,975 (95.7%) come back identical**, in 2.7 s
+   for the lot; docs/COMPILER.md and docs/ROUNDTRIP.md say what the rest is.
+5. **The analyses the ESL-compaction tooling needs**, with no compiler
    involved: `refs` lists every FormID literal paired with its plugin name,
    `patch --map` renumbers them in the compiled file, `closure` tells whether
    everything a script needs is present before anyone tries to compile it,
@@ -79,6 +83,8 @@ pex json <input> [--out <path>]  the whole model as JSON
 pex asm <input> [--out <path>]   Papyrus assembly (PapyrusAssembler syntax)
 pex assemble <listing> [--out <path>]
                                  the listing back to a .pex (our assembler)
+pex compile <psc|dir> --flags <flg> [--import <dirs>] [--resolve <Data>] [--out <dir>]
+                                 Papyrus source to .pex (our compiler)
 pex decompile <input> [--out <path>] [--resolve <Data>]
                                  Papyrus source; --resolve lets it consult the
                                  other scripts (parent chains, declarations)
@@ -89,6 +95,7 @@ pex patch <input> --map <FormIDMap> [--dry-run] [--backup]
 pex check --rewrite <input>      read + write, compare byte for byte
 pex check --asm <input> --tools "<game>\Papyrus Compiler"
 pex check --assemble <input> [--tools "<game>\Papyrus Compiler"]
+pex check --compile <SourceDir> --pex <Misc.bsa> --flags <flg>
 pex check --roundtrip <input> --tools "<game>\Papyrus Compiler" [--resolve <Data>]
                                  [--per-script-imports]   (mixed sets: mods)
 ```
@@ -132,10 +139,11 @@ of the build. Elsewhere: `cmake -B build && cmake --build build && ctest --test-
 ```
 include/papyrus/   pex.hpp (model, read/write, views), canon.hpp (comparison),
                    layout.hpp (source order), assemble.hpp (assembler),
-                   decompile.hpp, analysis.hpp
+                   compile.hpp (compiler), decompile.hpp, analysis.hpp
 src/               reader, writer, JSON, assembly writer and assembler, canon,
                    layout, analysis, decompile/ (lift, structure, psc_writer,
-                   event_names.inc)
+                   event_names.inc), compile/ (lexer, parser, interfaces,
+                   lowering, codegen)
 tools/             pex.cpp (CLI), inputs.hpp, process.hpp, resolver.hpp,
                    roundtrip.hpp, gen_event_names.py
 tests/             unit tests on synthetic scripts, fuzz target

@@ -23,6 +23,7 @@ add_library(skqe_papyrus STATIC
     src/compile/parser.cpp
     src/compile/compile.cpp
     src/compile/lower.cpp
+    src/compile/codegen.cpp
     src/canon.cpp
     src/layout.cpp
     src/decompile/lift.cpp

@@ -1,0 +1,761 @@
+.info
+  .source "Probe03_Logic.psc"
+  .modifyTime 1793842085
+  .compileTime 1793842085
+  .user "user"
+  .computer "machine"
+.endInfo
+.userFlagsRef
+  .flag conditional 1
+  .flag hidden 0
+.endUserFlagsRef
+.objectTable
+  .object Probe03_Logic ObjectReference
+    .userFlags 0
+    .docString "Probe: the temp an && / || accumulator takes, with the bool free list in known states; the listing (Probe03_Logic.pas.txt) is the answer."
+    .autoState 
+    .variableTable
+    .endVariableTable
+    .propertyTable
+    .endPropertyTable
+    .stateTable
+      .state
+        .function GetState
+          .userFlags 0
+          .docString "Function that returns the current state"
+          .return String
+          .paramTable
+          .endParamTable
+          .localTable
+          .endLocalTable
+          .code
+            RETURN ::state
+          .endCode
+        .endFunction
+        .function GotoState
+          .userFlags 0
+          .docString "Function that switches this object to the specified state"
+          .return None
+          .paramTable
+            .param newState String
+          .endParamTable
+          .localTable
+            .local ::NoneVar None
+          .endLocalTable
+          .code
+            CALLMETHOD onEndState self ::NoneVar
+            ASSIGN ::state newState
+            CALLMETHOD onBeginState self ::NoneVar
+          .endCode
+        .endFunction
+        .function F1 
+          .userFlags 0
+          .docString ""
+          .return Bool
+          .paramTable
+          .endParamTable
+          .localTable
+          .endLocalTable
+          .code
+            RETURN True ;@line 5
+          .endCode
+        .endFunction
+        .function F2 
+          .userFlags 0
+          .docString ""
+          .return Bool
+          .paramTable
+          .endParamTable
+          .localTable
+          .endLocalTable
+          .code
+            RETURN False ;@line 9
+          .endCode
+        .endFunction
+        .function Q0 
+          .userFlags 0
+          .docString ""
+          .return NONE
+          .paramTable
+            .param a Int
+            .param b Int
+          .endParamTable
+          .localTable
+            .local ::temp0 bool
+            .local ::temp1 bool
+            .local r Bool
+          .endLocalTable
+          .code
+            COMPAREEQ ::temp0 a 1 ;@line 14
+            CAST ::temp0 ::temp0 ;@line 14
+            JUMPT ::temp0 label0 ;@line 14
+            COMPAREEQ ::temp1 b 2 ;@line 14
+            CAST ::temp0 ::temp1 ;@line 14
+            label0:
+            ASSIGN r ::temp0 ;@line 14
+          .endCode
+        .endFunction
+        .function Q1 
+          .userFlags 0
+          .docString ""
+          .return NONE
+          .paramTable
+            .param a Int
+            .param b Int
+          .endParamTable
+          .localTable
+            .local ::temp2 bool
+            .local ::temp3 bool
+            .local p Bool
+            .local r Bool
+          .endLocalTable
+          .code
+            COMPAREEQ ::temp2 a 7 ;@line 19
+            ASSIGN p ::temp2 ;@line 19
+            COMPAREEQ ::temp2 a 1 ;@line 20
+            CAST ::temp2 ::temp2 ;@line 20
+            JUMPT ::temp2 label1 ;@line 20
+            COMPAREEQ ::temp3 b 2 ;@line 20
+            CAST ::temp2 ::temp3 ;@line 20
+            label1:
+            ASSIGN r ::temp2 ;@line 20
+          .endCode
+        .endFunction
+        .function Q2 
+          .userFlags 0
+          .docString ""
+          .return NONE
+          .paramTable
+            .param a Int
+            .param b Int
+          .endParamTable
+          .localTable
+            .local ::temp4 bool
+            .local ::temp5 bool
+            .local p Bool
+            .local r Bool
+          .endLocalTable
+          .code
+            COMPAREEQ ::temp4 a 7 ;@line 25
+            COMPAREEQ ::temp5 b 8 ;@line 25
+            COMPAREEQ ::temp4 ::temp4 ::temp5 ;@line 25
+            ASSIGN p ::temp4 ;@line 25
+            COMPAREEQ ::temp5 a 1 ;@line 26
+            CAST ::temp5 ::temp5 ;@line 26
+            JUMPT ::temp5 label2 ;@line 26
+            COMPAREEQ ::temp4 b 2 ;@line 26
+            CAST ::temp5 ::temp4 ;@line 26
+            label2:
+            ASSIGN r ::temp5 ;@line 26
+          .endCode
+        .endFunction
+        .function Q3 
+          .userFlags 0
+          .docString ""
+          .return NONE
+          .paramTable
+            .param a Int
+            .param b Int
+          .endParamTable
+          .localTable
+            .local ::temp6 bool
+            .local ::temp7 bool
+            .local p Bool
+            .local r Bool
+          .endLocalTable
+          .code
+            COMPAREEQ ::temp6 a 7 ;@line 31
+            ASSIGN p ::temp6 ;@line 31
+            CALLMETHOD F1 self ::temp6  ;@line 32
+            CAST ::temp6 ::temp6 ;@line 32
+            JUMPT ::temp6 label3 ;@line 32
+            COMPAREEQ ::temp7 b 2 ;@line 32
+            CAST ::temp6 ::temp7 ;@line 32
+            label3:
+            ASSIGN r ::temp6 ;@line 32
+          .endCode
+        .endFunction
+        .function Q4 
+          .userFlags 0
+          .docString ""
+          .return NONE
+          .paramTable
+            .param a Int
+            .param b Int
+            .param f Bool
+          .endParamTable
+          .localTable
+            .local ::temp8 bool
+            .local p Bool
+            .local r Bool
+          .endLocalTable
+          .code
+            COMPAREEQ ::temp8 a 7 ;@line 37
+            ASSIGN p ::temp8 ;@line 37
+            CAST ::temp8 f ;@line 38
+            JUMPT ::temp8 label4 ;@line 38
+            COMPAREEQ ::temp8 b 2 ;@line 38
+            CAST ::temp8 ::temp8 ;@line 38
+            label4:
+            ASSIGN r ::temp8 ;@line 38
+          .endCode
+        .endFunction
+        .function Q5 
+          .userFlags 0
+          .docString ""
+          .return NONE
+          .paramTable
+            .param a Int
+            .param b Int
+          .endParamTable
+          .localTable
+            .local ::temp9 bool
+            .local ::temp10 bool
+            .local p Bool
+            .local r Bool
+          .endLocalTable
+          .code
+            COMPAREEQ ::temp9 a 7 ;@line 43
+            ASSIGN p ::temp9 ;@line 43
+            COMPAREEQ ::temp9 a 1 ;@line 44
+            CAST ::temp9 ::temp9 ;@line 44
+            JUMPT ::temp9 label5 ;@line 44
+            CALLMETHOD F1 self ::temp10  ;@line 44
+            CAST ::temp9 ::temp10 ;@line 44
+            label5:
+            ASSIGN r ::temp9 ;@line 44
+          .endCode
+        .endFunction
+        .function Q6 
+          .userFlags 0
+          .docString ""
+          .return NONE
+          .paramTable
+            .param a Int
+            .param b Int
+            .param f Bool
+          .endParamTable
+          .localTable
+            .local ::temp11 bool
+            .local ::temp12 bool
+            .local p Bool
+            .local r Bool
+          .endLocalTable
+          .code
+            COMPAREEQ ::temp11 a 7 ;@line 49
+            ASSIGN p ::temp11 ;@line 49
+            COMPAREEQ ::temp11 a 1 ;@line 50
+            CAST ::temp11 ::temp11 ;@line 50
+            JUMPT ::temp11 label6 ;@line 50
+            CALLMETHOD F1 self ::temp12  ;@line 50
+            COMPAREEQ ::temp12 ::temp12 f ;@line 50
+            CAST ::temp11 ::temp12 ;@line 50
+            label6:
+            ASSIGN r ::temp11 ;@line 50
+          .endCode
+        .endFunction
+        .function Q7 
+          .userFlags 0
+          .docString ""
+          .return NONE
+          .paramTable
+            .param a Int
+            .param b Int
+            .param c Int
+          .endParamTable
+          .localTable
+            .local ::temp13 bool
+            .local ::temp14 bool
+            .local ::temp15 bool
+            .local p Bool
+            .local r Bool
+            .local s2 Bool
+            .local t2 Bool
+          .endLocalTable
+          .code
+            COMPAREEQ ::temp13 a 7 ;@line 55
+            ASSIGN p ::temp13 ;@line 55
+            COMPAREEQ ::temp13 a 1 ;@line 56
+            CAST ::temp13 ::temp13 ;@line 56
+            JUMPT ::temp13 label7 ;@line 56
+            COMPAREEQ ::temp14 b 2 ;@line 56
+            CAST ::temp13 ::temp14 ;@line 56
+            label7:
+            CAST ::temp13 ::temp13 ;@line 56
+            JUMPT ::temp13 label8 ;@line 56
+            COMPAREEQ ::temp14 c 3 ;@line 56
+            CAST ::temp13 ::temp14 ;@line 56
+            label8:
+            ASSIGN r ::temp13 ;@line 56
+            COMPAREEQ ::temp14 a 1 ;@line 57
+            CAST ::temp15 ::temp14 ;@line 57
+            JUMPT ::temp15 label10 ;@line 57
+            COMPAREEQ ::temp13 b 2 ;@line 57
+            CAST ::temp13 ::temp13 ;@line 57
+            JUMPT ::temp13 label9 ;@line 57
+            COMPAREEQ ::temp15 c 3 ;@line 57
+            CAST ::temp13 ::temp15 ;@line 57
+            label9:
+            CAST ::temp15 ::temp13 ;@line 57
+            label10:
+            ASSIGN s2 ::temp15 ;@line 57
+            COMPAREEQ ::temp14 a 1 ;@line 58
+            CAST ::temp15 ::temp14 ;@line 58
+            JUMPF ::temp15 label11 ;@line 58
+            COMPAREEQ ::temp13 b 2 ;@line 58
+            CAST ::temp15 ::temp13 ;@line 58
+            label11:
+            CAST ::temp13 ::temp15 ;@line 58
+            JUMPT ::temp13 label12 ;@line 58
+            COMPAREEQ ::temp14 c 3 ;@line 58
+            CAST ::temp13 ::temp14 ;@line 58
+            label12:
+            ASSIGN t2 ::temp13 ;@line 58
+          .endCode
+        .endFunction
+        .function Q8 
+          .userFlags 0
+          .docString ""
+          .return NONE
+          .paramTable
+            .param a Int
+            .param b Int
+            .param c Int
+            .param f Bool
+          .endParamTable
+          .localTable
+            .local ::temp16 bool
+            .local ::temp17 bool
+            .local x1 Bool
+            .local ::temp18 bool
+            .local x2 Bool
+            .local x3 Bool
+            .local y1 Bool
+            .local y2 Bool
+            .local y3 Bool
+          .endLocalTable
+          .code
+            COMPAREEQ ::temp16 a 1 ;@line 63
+            CAST ::temp16 ::temp16 ;@line 63
+            JUMPF ::temp16 label14 ;@line 63
+            COMPAREEQ ::temp17 b 2 ;@line 63
+            CAST ::temp16 ::temp17 ;@line 63
+            label14:
+            JUMPF ::temp16 label19 ;@line 63
+            COMPAREEQ ::temp17 c 1 ;@line 64
+            ASSIGN x1 ::temp17 ;@line 64
+            JUMP label13
+            label19:
+            COMPAREEQ ::temp17 c 3 ;@line 65
+            CAST ::temp17 ::temp17 ;@line 65
+            JUMPF ::temp17 label15 ;@line 65
+            CAST ::temp17 f ;@line 65
+            label15:
+            JUMPF ::temp17 label16 ;@line 65
+            COMPAREEQ ::temp18 c 2 ;@line 66
+            ASSIGN x2 ::temp18 ;@line 66
+            JUMP label13
+            label16:
+            CALLMETHOD F1 self ::temp18  ;@line 67
+            CAST ::temp18 ::temp18 ;@line 67
+            JUMPT ::temp18 label17 ;@line 67
+            CALLMETHOD F2 self ::temp17  ;@line 67
+            CAST ::temp18 ::temp17 ;@line 67
+            label17:
+            JUMPF ::temp18 label18 ;@line 67
+            COMPAREEQ ::temp17 c 3 ;@line 68
+            ASSIGN x3 ::temp17 ;@line 68
+            JUMP label13
+            label18:
+            label13:
+            COMPAREEQ ::temp17 a 4 ;@line 70
+            ASSIGN y1 ::temp17 ;@line 70
+            COMPAREEQ ::temp18 a 5 ;@line 71
+            ASSIGN y2 ::temp18 ;@line 71
+            COMPAREEQ ::temp16 a 6 ;@line 72
+            ASSIGN y3 ::temp16 ;@line 72
+          .endCode
+        .endFunction
+        .function Q9 
+          .userFlags 0
+          .docString ""
+          .return NONE
+          .paramTable
+            .param a Int
+            .param b Int
+          .endParamTable
+          .localTable
+            .local ::temp19 bool
+            .local ::temp20 bool
+            .local ::temp21 bool
+            .local p Bool
+            .local r Bool
+            .local s2 Bool
+          .endLocalTable
+          .code
+            COMPAREEQ ::temp19 a 7 ;@line 77
+            ASSIGN p ::temp19 ;@line 77
+            CAST ::temp19 a ;@line 78
+            JUMPT ::temp19 label20 ;@line 78
+            CAST ::temp19 b ;@line 78
+            label20:
+            ASSIGN r ::temp19 ;@line 78
+            CALLMETHOD F1 self ::temp19  ;@line 79
+            CAST ::temp20 1 ;@line 79
+            COMPAREEQ ::temp20 ::temp19 ::temp20 ;@line 79
+            CAST ::temp19 ::temp20 ;@line 79
+            JUMPT ::temp19 label21 ;@line 79
+            CALLMETHOD F2 self ::temp19  ;@line 79
+            CAST ::temp21 0 ;@line 79
+            COMPAREEQ ::temp21 ::temp19 ::temp21 ;@line 79
+            CAST ::temp19 ::temp21 ;@line 79
+            label21:
+            ASSIGN s2 ::temp19 ;@line 79
+          .endCode
+        .endFunction
+        .function Q10 
+          .userFlags 0
+          .docString ""
+          .return NONE
+          .paramTable
+            .param a Int
+            .param b Int
+          .endParamTable
+          .localTable
+            .local ::temp22 bool
+            .local ::temp23 bool
+            .local p Bool
+            .local q Bool
+            .local r Bool
+          .endLocalTable
+          .code
+            COMPAREEQ ::temp22 a 7 ;@line 84
+            COMPAREEQ ::temp23 b 8 ;@line 84
+            COMPAREEQ ::temp22 ::temp22 ::temp23 ;@line 84
+            ASSIGN p ::temp22 ;@line 84
+            COMPAREEQ ::temp23 a 9 ;@line 85
+            ASSIGN q ::temp23 ;@line 85
+            COMPAREEQ ::temp22 a 1 ;@line 86
+            CAST ::temp22 ::temp22 ;@line 86
+            JUMPT ::temp22 label22 ;@line 86
+            COMPAREEQ ::temp23 b 2 ;@line 86
+            CAST ::temp22 ::temp23 ;@line 86
+            label22:
+            ASSIGN r ::temp22 ;@line 86
+          .endCode
+        .endFunction
+        .function Qa 
+          .userFlags 0
+          .docString ""
+          .return NONE
+          .paramTable
+            .param a Int
+            .param b Int
+            .param c Int
+          .endParamTable
+          .localTable
+            .local ::temp24 bool
+            .local ::temp25 bool
+            .local ::temp26 bool
+            .local r Bool
+          .endLocalTable
+          .code
+            COMPAREEQ ::temp24 a 1 ;@line 91
+            CAST ::temp26 ::temp24 ;@line 91
+            JUMPT ::temp26 label24 ;@line 91
+            COMPAREEQ ::temp25 b 2 ;@line 91
+            CAST ::temp25 ::temp25 ;@line 91
+            JUMPT ::temp25 label23 ;@line 91
+            COMPAREEQ ::temp26 c 3 ;@line 91
+            CAST ::temp25 ::temp26 ;@line 91
+            label23:
+            CAST ::temp26 ::temp25 ;@line 91
+            label24:
+            ASSIGN r ::temp26 ;@line 91
+          .endCode
+        .endFunction
+        .function Qb 
+          .userFlags 0
+          .docString ""
+          .return NONE
+          .paramTable
+            .param a Int
+            .param b Int
+            .param c Int
+          .endParamTable
+          .localTable
+            .local ::temp27 bool
+            .local ::temp28 bool
+            .local ::temp29 bool
+            .local p Bool
+            .local r Bool
+          .endLocalTable
+          .code
+            COMPAREEQ ::temp27 a 7 ;@line 95
+            ASSIGN p ::temp27 ;@line 95
+            COMPAREEQ ::temp27 a 1 ;@line 96
+            CAST ::temp29 ::temp27 ;@line 96
+            JUMPT ::temp29 label26 ;@line 96
+            COMPAREEQ ::temp28 b 2 ;@line 96
+            CAST ::temp28 ::temp28 ;@line 96
+            JUMPT ::temp28 label25 ;@line 96
+            COMPAREEQ ::temp29 c 3 ;@line 96
+            CAST ::temp28 ::temp29 ;@line 96
+            label25:
+            CAST ::temp29 ::temp28 ;@line 96
+            label26:
+            ASSIGN r ::temp29 ;@line 96
+          .endCode
+        .endFunction
+        .function Qc 
+          .userFlags 0
+          .docString ""
+          .return NONE
+          .paramTable
+            .param a Int
+            .param b Int
+            .param c Int
+          .endParamTable
+          .localTable
+            .local ::temp30 bool
+            .local ::temp31 bool
+            .local ::temp32 bool
+            .local p Bool
+            .local r Bool
+          .endLocalTable
+          .code
+            COMPAREEQ ::temp30 a 7 ;@line 100
+            COMPAREEQ ::temp31 b 8 ;@line 100
+            COMPAREEQ ::temp30 ::temp30 ::temp31 ;@line 100
+            ASSIGN p ::temp30 ;@line 100
+            COMPAREEQ ::temp31 a 1 ;@line 101
+            CAST ::temp32 ::temp31 ;@line 101
+            JUMPT ::temp32 label28 ;@line 101
+            COMPAREEQ ::temp30 b 2 ;@line 101
+            CAST ::temp30 ::temp30 ;@line 101
+            JUMPT ::temp30 label27 ;@line 101
+            COMPAREEQ ::temp32 c 3 ;@line 101
+            CAST ::temp30 ::temp32 ;@line 101
+            label27:
+            CAST ::temp32 ::temp30 ;@line 101
+            label28:
+            ASSIGN r ::temp32 ;@line 101
+          .endCode
+        .endFunction
+        .function Qd 
+          .userFlags 0
+          .docString ""
+          .return NONE
+          .paramTable
+            .param a Int
+            .param b Int
+            .param c Int
+          .endParamTable
+          .localTable
+            .local ::temp33 bool
+            .local ::temp34 bool
+            .local p Bool
+            .local r Bool
+          .endLocalTable
+          .code
+            COMPAREEQ ::temp33 a 7 ;@line 105
+            ASSIGN p ::temp33 ;@line 105
+            COMPAREEQ ::temp33 a 1 ;@line 106
+            CAST ::temp33 ::temp33 ;@line 106
+            JUMPF ::temp33 label29 ;@line 106
+            COMPAREEQ ::temp34 b 2 ;@line 106
+            CAST ::temp33 ::temp34 ;@line 106
+            label29:
+            CAST ::temp33 ::temp33 ;@line 106
+            JUMPT ::temp33 label30 ;@line 106
+            COMPAREEQ ::temp34 c 3 ;@line 106
+            CAST ::temp33 ::temp34 ;@line 106
+            label30:
+            ASSIGN r ::temp33 ;@line 106
+          .endCode
+        .endFunction
+        .function Qe 
+          .userFlags 0
+          .docString ""
+          .return NONE
+          .paramTable
+            .param a Int
+            .param b Int
+          .endParamTable
+          .localTable
+            .local ::temp35 bool
+            .local ::temp36 bool
+            .local ::temp37 bool
+            .local r Bool
+          .endLocalTable
+          .code
+            CALLMETHOD F1 self ::temp35  ;@line 110
+            CAST ::temp36 1 ;@line 110
+            COMPAREEQ ::temp36 ::temp35 ::temp36 ;@line 110
+            CAST ::temp35 ::temp36 ;@line 110
+            JUMPT ::temp35 label31 ;@line 110
+            CALLMETHOD F2 self ::temp35  ;@line 110
+            CAST ::temp37 0 ;@line 110
+            COMPAREEQ ::temp37 ::temp35 ::temp37 ;@line 110
+            CAST ::temp35 ::temp37 ;@line 110
+            label31:
+            ASSIGN r ::temp35 ;@line 110
+          .endCode
+        .endFunction
+        .function Qg 
+          .userFlags 0
+          .docString ""
+          .return NONE
+          .paramTable
+            .param a Int
+            .param b Int
+          .endParamTable
+          .localTable
+            .local ::temp38 bool
+            .local ::temp39 bool
+            .local p Bool
+            .local r Bool
+          .endLocalTable
+          .code
+            COMPAREEQ ::temp38 a 7 ;@line 114
+            COMPAREEQ ::temp39 b 8 ;@line 114
+            COMPAREEQ ::temp38 ::temp38 ::temp39 ;@line 114
+            ASSIGN p ::temp38 ;@line 114
+            CALLMETHOD F1 self ::temp39  ;@line 115
+            CAST ::temp39 ::temp39 ;@line 115
+            JUMPT ::temp39 label32 ;@line 115
+            COMPAREEQ ::temp38 b 2 ;@line 115
+            CAST ::temp39 ::temp38 ;@line 115
+            label32:
+            ASSIGN r ::temp39 ;@line 115
+          .endCode
+        .endFunction
+        .function Qh 
+          .userFlags 0
+          .docString ""
+          .return NONE
+          .paramTable
+            .param a Int
+            .param b Int
+            .param f Bool
+          .endParamTable
+          .localTable
+            .local ::temp40 bool
+            .local ::temp41 bool
+            .local p Bool
+            .local r Bool
+          .endLocalTable
+          .code
+            COMPAREEQ ::temp40 a 7 ;@line 119
+            COMPAREEQ ::temp41 b 8 ;@line 119
+            COMPAREEQ ::temp40 ::temp40 ::temp41 ;@line 119
+            ASSIGN p ::temp40 ;@line 119
+            CAST ::temp40 f ;@line 120
+            JUMPT ::temp40 label33 ;@line 120
+            COMPAREEQ ::temp41 b 2 ;@line 120
+            CAST ::temp40 ::temp41 ;@line 120
+            label33:
+            ASSIGN r ::temp40 ;@line 120
+          .endCode
+        .endFunction
+        .function Qi 
+          .userFlags 0
+          .docString ""
+          .return NONE
+          .paramTable
+            .param a Int
+            .param b Int
+            .param c Int
+          .endParamTable
+          .localTable
+            .local ::temp42 bool
+            .local ::temp43 bool
+            .local r Bool
+          .endLocalTable
+          .code
+            COMPAREEQ ::temp42 a 1 ;@line 124
+            CAST ::temp42 ::temp42 ;@line 124
+            JUMPT ::temp42 label34 ;@line 124
+            COMPAREEQ ::temp43 b 2 ;@line 124
+            CAST ::temp42 ::temp43 ;@line 124
+            label34:
+            CAST ::temp42 ::temp42 ;@line 124
+            JUMPT ::temp42 label35 ;@line 124
+            COMPAREEQ ::temp43 c 3 ;@line 124
+            CAST ::temp42 ::temp43 ;@line 124
+            label35:
+            ASSIGN r ::temp42 ;@line 124
+          .endCode
+        .endFunction
+        .function Qj 
+          .userFlags 0
+          .docString ""
+          .return NONE
+          .paramTable
+            .param a Int
+            .param b Int
+            .param c Int
+          .endParamTable
+          .localTable
+            .local ::temp44 bool
+            .local ::temp45 bool
+            .local p Bool
+            .local r Bool
+          .endLocalTable
+          .code
+            COMPAREEQ ::temp44 a 7 ;@line 128
+            COMPAREEQ ::temp45 b 8 ;@line 128
+            COMPAREEQ ::temp44 ::temp44 ::temp45 ;@line 128
+            ASSIGN p ::temp44 ;@line 128
+            COMPAREEQ ::temp45 a 1 ;@line 129
+            CAST ::temp45 ::temp45 ;@line 129
+            JUMPT ::temp45 label36 ;@line 129
+            COMPAREEQ ::temp44 b 2 ;@line 129
+            CAST ::temp45 ::temp44 ;@line 129
+            label36:
+            CAST ::temp45 ::temp45 ;@line 129
+            JUMPT ::temp45 label37 ;@line 129
+            COMPAREEQ ::temp44 c 3 ;@line 129
+            CAST ::temp45 ::temp44 ;@line 129
+            label37:
+            ASSIGN r ::temp45 ;@line 129
+          .endCode
+        .endFunction
+        .function Qk 
+          .userFlags 0
+          .docString ""
+          .return NONE
+          .paramTable
+            .param a Int
+            .param b Int
+            .param c Int
+          .endParamTable
+          .localTable
+            .local ::temp46 bool
+            .local ::temp47 bool
+            .local p Bool
+            .local r Bool
+          .endLocalTable
+          .code
+            COMPAREEQ ::temp46 a 7 ;@line 133
+            COMPAREEQ ::temp47 b 8 ;@line 133
+            COMPAREEQ ::temp46 ::temp46 ::temp47 ;@line 133
+            ASSIGN p ::temp46 ;@line 133
+            COMPAREEQ ::temp47 a 1 ;@line 134
+            CAST ::temp47 ::temp47 ;@line 134
+            JUMPF ::temp47 label38 ;@line 134
+            COMPAREEQ ::temp46 b 2 ;@line 134
+            CAST ::temp47 ::temp46 ;@line 134
+            label38:
+            CAST ::temp47 ::temp47 ;@line 134
+            JUMPT ::temp47 label39 ;@line 134
+            COMPAREEQ ::temp46 c 3 ;@line 134
+            CAST ::temp47 ::temp46 ;@line 134
+            label39:
+            ASSIGN r ::temp47 ;@line 134
+          .endCode
+        .endFunction
+      .endState
+    .endStateTable
+  .endObject
+.endObjectTable
