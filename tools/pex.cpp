@@ -108,11 +108,16 @@ commands
   check --parse <SourceDir>    parse every .psc below the folder with the compiler
                                front end; lists the files it cannot parse
   check --compile <SourceDir> --pex <input> [--import <dir;dir>] [--flags <flg>]
-            [--declarations]
+            [--declarations] [--tools <dir>]
                                compile every source that has a compiled
                                counterpart in <input> with our compiler and
                                compare with it at model level; prints the share
-                               identical (--declarations: declarations only)
+                               identical (--declarations: declarations only).
+                               With --tools, a source whose result differs from
+                               the shipped file is also compiled with
+                               PapyrusCompiler.exe: "source drift" when ours
+                               equals Bethesda's result, "differs from
+                               PapyrusCompiler" when not
   check --assemble <input> [--tools <dir>]
                                assemble our listing with our own assembler
                                and compare with the original at model level,
@@ -1019,6 +1024,42 @@ int cmd_compile(int argc, char** argv) {
     return failures ? 1 : 0;
 }
 
+// Compiles one source with PapyrusCompiler.exe into <dir>; reads the result.
+bool compile_with_tool(const fs::path& compiler, const fs::path& dir, const fs::path& source, const fs::path& flags,
+                       const std::vector<fs::path>& imports, pex::Script& out, std::string& category, std::string& detail) {
+    std::string importArg;
+    for (const fs::path& p : imports) {
+        if (!importArg.empty()) importArg += ';';
+        importArg += p.string();
+    }
+    pextool::RunResult r;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        if (attempt) std::this_thread::sleep_for(std::chrono::milliseconds(100 * attempt));
+        r = pextool::run(compiler, {source.filename().string(), "-f=" + flags.string(), "-i=" + importArg, "-o=" + dir.string(), "-q"},
+                         source.parent_path());
+        if (!r.started || r.exitCode == 0 || r.output.find("error while attempting to read") == std::string::npos) break;
+    }
+    if (!r.started) {
+        category = "compiler not started";
+        detail = compiler.string();
+        return false;
+    }
+    std::error_code ec;
+    const fs::path produced = dir / source.filename().replace_extension(".pex");
+    if (r.exitCode != 0 || !fs::exists(produced, ec)) {
+        category = "PapyrusCompiler cannot compile";
+        detail = first_error_line(r.output);
+        return false;
+    }
+    std::string err;
+    if (pex::read_file(produced, out, &err) != pex::Status::Ok) {
+        category = "compiler output unreadable";
+        detail = err;
+        return false;
+    }
+    return true;
+}
+
 // Every source with a compiled counterpart in --pex, compiled with our
 // compiler and compared with it canonically.
 int check_compile(const Options& o) {
@@ -1031,6 +1072,13 @@ int check_compile(const Options& o) {
     if (files.empty()) return 2;
     const CompileSetup setup = compile_setup(o, folders);
     if (!setup.ok) return 2;
+    const fs::path compiler = find_tool(o, "PapyrusCompiler.exe", "check --compile", false);
+    if (!o.tools.empty() && compiler.empty()) return 2;
+    fs::path workDir;
+    if (!compiler.empty()) {
+        workDir = make_work_dir(o);
+        if (workDir.empty()) return 2;
+    }
     std::vector<pextool::Item> items;
     std::vector<std::string> warnings;
     if (!pextool::enumerate(fs::u8path(o.pexInput), items, warnings)) {
@@ -1082,7 +1130,28 @@ int check_compile(const Options& o) {
                 cmp.compareHeader = false;
                 cmp.declarationsOnly = o.declarations;
                 if (!pex::canonical_equal(original, ours, &diffs, cmp)) {
-                    tally.fail(it, std::string(pex::to_string(diffs.front().kind)) + " diff", difference_text(diffs));
+                    if (compiler.empty()) {
+                        tally.fail(it, std::string(pex::to_string(diffs.front().kind)) + " diff", difference_text(diffs));
+                        continue;
+                    }
+                    // Bethesda's compiler on the same source: does it agree with us?
+                    const fs::path dir = workDir / std::to_string(i);
+                    std::error_code e2;
+                    fs::create_directories(dir, e2);
+                    pex::Script theirs;
+                    std::string category, detail;
+                    if (!compile_with_tool(compiler, dir, work[i].first, fs::u8path(o.flags), setup.imports, theirs, category, detail)) {
+                        tally.fail(it, category, detail);
+                    } else {
+                        std::vector<pex::Difference> d2;
+                        if (pex::canonical_equal(theirs, ours, &d2, cmp)) {
+                            tally.fail(it, "source drift (equal to PapyrusCompiler)", difference_text(diffs));
+                        } else {
+                            tally.fail(it, std::string("differs from PapyrusCompiler: ") + pex::to_string(d2.front().kind),
+                                       difference_text(d2));
+                        }
+                    }
+                    if (!o.keep) fs::remove_all(dir, e2);
                     continue;
                 }
                 tally.pass();
@@ -1090,6 +1159,10 @@ int check_compile(const Options& o) {
         });
     }
     for (std::thread& t : pool) t.join();
+    if (!workDir.empty() && !o.keep) {
+        std::error_code ec;
+        fs::remove_all(workDir, ec);
+    }
     std::fprintf(stdout, "sources %zu  with a compiled counterpart %zu\n", files.size(), work.size());
     return tally.finish(work.size(), std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
 }

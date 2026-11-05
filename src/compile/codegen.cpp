@@ -50,6 +50,7 @@ public:
             s.type = TypeRef::of(p.type);
             m_scopes.back()[lower(p.name)] = s;
         }
+        m_scopes.emplace_back();  // the body's own scope, apart from the parameters
         for (const StmtPtr& st : m_f.body) statement(*st);
         resolve_jumps();
     }
@@ -177,6 +178,10 @@ private:
         return Value::identifier(m_c.intern("::NoneVar"));
     }
 
+    const Slot* find_param(std::string_view name) const {
+        auto it = m_scopes.front().find(lower(name));
+        return it != m_scopes.front().end() ? &it->second : nullptr;
+    }
     const Slot* find_local(std::string_view name) const {
         const std::string key = lower(name);
         for (size_t i = m_scopes.size(); i-- > 0;) {
@@ -195,9 +200,11 @@ private:
         std::string pexName = name;
         if (m_localNames.count(key)) {
             // The same name declared again in another scope of the function:
-            // the first keeps the name, the next ones are ::mangled_<name>_0,
-            // _1, ... (vanilla ArenaScript.PickNextFight).
-            pexName = "::mangled_" + name + "_" + std::to_string(m_localNames[key] - 1);
+            // the first keeps the name, the next ones are ::mangled_<name>_N
+            // with one counter per function over all names (vanilla
+            // ArenaScript.PickNextFight: fightIndex, _0, _1, _2;
+            // pEmperorDecoyScript.OnDeath: ::mangled_script_0, ::mangled_decoy_1).
+            pexName = "::mangled_" + name + "_" + std::to_string(m_mangled++);
         }
         ++m_localNames[key];
         s.pexName = m_c.intern(pexName);
@@ -252,22 +259,37 @@ private:
         std::string typeName;               // Type
     };
 
+    // A property, own or inherited, wins over a local or parameter of the
+    // same name (vanilla PhysicsTrap: `int damage` declared, `damage = ...`
+    // compiles to the parent's `::damage_var`; dunMiddenHandSculptureSCRIPT:
+    // `float x = ...; return x` reads ObjectReference's X property).
     Name resolve(const std::string& ident, int line) {
         Name n;
-        if (const Slot* s = find_local(ident)) {
+        if (const Slot* s = find_param(ident)) {
+            // A parameter wins over everything (vanilla dunYngolGlowAttractTrig:
+            // the parameter moteList, not the property of that name).
             n.kind = NameKind::Local;
             n.pexName = s->pexName;
             n.type = s->type;
             return n;
         }
-        if (const VarInfo* v = m_self.own_variable(ident)) {
-            n.kind = NameKind::Variable;
-            n.pexName = m_c.intern(v->name);
-            n.type = v->type;
-            return n;
-        }
         const ScriptInfo* owner = nullptr;
-        if (const PropInfo* p = m_prog.find_property(m_self, ident, &owner)) {
+        const PropInfo* p = m_prog.find_property(m_self, ident, &owner);
+        if (!p) {
+            if (const Slot* s = find_local(ident)) {
+                n.kind = NameKind::Local;
+                n.pexName = s->pexName;
+                n.type = s->type;
+                return n;
+            }
+            if (const VarInfo* v = m_self.own_variable(ident)) {
+                n.kind = NameKind::Variable;
+                n.pexName = m_c.intern(v->name);
+                n.type = v->type;
+                return n;
+            }
+        }
+        if (p) {
             n.prop = p;
             n.owner = owner;
             n.type = p->type;
@@ -661,17 +683,33 @@ private:
         // lives until the call (vanilla AnimalTrainerSystemScript: PROPGET,
         // CAST of the second argument, then CAST of the first;
         // BYOHHouseBanditAttackPacifyOnLoad: two None arguments, two temps).
+        // An argument's cast keeps its source temp allocated too: the source
+        // is released with the other argument values after the casts
+        // (vanilla DLC1_TIF__02012F5C: `RemoveItem(item, 1, false,
+        // X.GetActorRef())` casts item and the actor into two fresh temps).
+        std::vector<Operand> casts(fn.params.size());
+        std::vector<bool> isCast(fn.params.size(), false);
         for (size_t i = 0; i < fn.params.size(); ++i) {
-            if (!given[i]) continue;
-            args[i] = convert(args[i], fn.params[i].type, e.line, false);
+            if (!given[i] || same_type(args[i].type, fn.params[i].type)) continue;
+            if (!implicit_ok(args[i].type, fn.params[i].type)) {
+                error(e.line, "cannot convert " + type_text(args[i].type) + " to " + type_text(fn.params[i].type) + " without a cast");
+            }
+            casts[i] = alloc(fn.params[i].type);
+            emit(Opcode::Cast, {casts[i].v, args[i].v});
+            isCast[i] = true;
         }
-        // The argument temps (casts included) are released left to right,
-        // then the result temp is taken, then the receiver is released after
-        // the call. Vanilla: DA13SpellbreakerStaticFX `RandomFloat(0.5, 1)`
-        // casts 1 into t0 and the result lands in t0; BYOH_QF_BYOHHouseHjaalmarch
-        // keeps the receiver t16 of GetRef() while PlaceAtMe's result takes a
-        // fresh t18; ArenaCrowdQuestScript's receiver and argument temps of
-        // consecutive calls alternate.
+        // The cast temps are released first (in order), then the other
+        // argument temps left to right, then the result temp is taken, then
+        // the receiver is released after the call. Vanilla:
+        // DA13SpellbreakerStaticFX `RandomFloat(0.5, 1)` casts 1 into t0 and
+        // the result lands in t0; dunHunterGuardians `TranslateTo(X, Y, Z +
+        // offset, 180, 180, 180, ...)` leaves the list as casts then values;
+        // BYOH_QF_BYOHHouseHjaalmarch keeps the receiver of GetRef() while
+        // PlaceAtMe's result takes a fresh temp; ArenaCrowdQuestScript's
+        // receiver and argument temps of consecutive calls alternate.
+        for (size_t i = 0; i < args.size(); ++i) {
+            if (isCast[i]) release(casts[i]);
+        }
         for (Operand& a : args) release(a);
         Operand dest;
         if (is_none(fn.ret)) {
@@ -694,7 +732,7 @@ private:
             break;
         default: break;
         }
-        for (const Operand& a : args) ops.push_back(a.v);
+        for (size_t i = 0; i < args.size(); ++i) ops.push_back(isCast[i] ? casts[i].v : args[i].v);
         emit(c.kind == Callee::Method ? Opcode::CallMethod : c.kind == Callee::Parent ? Opcode::CallParent : Opcode::CallStatic,
              std::move(ops));
         (void)discard;
@@ -768,8 +806,10 @@ private:
                 if (is_none(m_fi.ret)) error(st.line, "this function does not return a value");
                 // The compiler never releases the temp a Return consumes
                 // (vanilla ArenaScript.PickNextFight: every `Return f()` gets
-                // a fresh temp), nor the cast temp it may need.
-                Operand v = convert(expr(*st.expr), m_fi.ret, st.line, false);
+                // a fresh temp); a cast's temp is released at the cast as
+                // always (CCHouseQuestScript: `Return None` then
+                // `Return arr[i]` share the temp).
+                Operand v = convert(expr(*st.expr), m_fi.ret, st.line);
                 emit(Opcode::Return, {v.v});
             } else {
                 if (!is_none(m_fi.ret)) error(st.line, "a value must be returned");
@@ -855,9 +895,9 @@ private:
                 Operand slot = alloc(n.type);
                 Operand v = convert(expr(*rhs), n.type, st.line);
                 emit(Opcode::Assign, {slot.v, v.v});
-                release(v);
                 emit(Opcode::PropSet, {id(n.prop->name), id("self"), slot.v});
                 release(slot);
+                release(v);
                 return;
             }
             default: error(st.line, "cannot assign to " + target.text);
@@ -973,6 +1013,7 @@ private:
     int m_line = 0;
     std::vector<std::map<std::string, Slot>> m_scopes;
     std::map<std::string, int> m_localNames;
+    int m_mangled = 0;
     std::map<std::string, std::deque<StrIdx>> m_free;
     bool m_haveNoneVar = false;
     std::vector<size_t> m_labels;

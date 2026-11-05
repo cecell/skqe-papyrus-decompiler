@@ -33,8 +33,12 @@ script on a modded machine, and the numbers are in the docs. What it does:
    explains every class of the rest.
 4. **A compiler** for Skyrim's Papyrus (`pex compile`), proved by compiling
    every vanilla source and comparing with the shipped compiled file at
-   model level: **13,372 of 13,975 (95.7%) come back identical**, in 2.7 s
-   for the lot; docs/COMPILER.md and docs/ROUNDTRIP.md say what the rest is.
+   model level: **13,396 of 13,975 (95.9%) come back identical**, in 2.7 s
+   for the lot, and 97.6% of the scripts Bethesda's compiler can build from
+   those sources (the shipped sources have drifted for 143 of them); all but
+   one of the rest are the compiler's hash order of state blocks, which
+   decides the case of literals that match a state name. docs/COMPILER.md
+   and docs/ROUNDTRIP.md say what the rest is.
 5. **The analyses the ESL-compaction tooling needs**, with no compiler
    involved: `refs` lists every FormID literal paired with its plugin name,
    `patch --map` renumbers them in the compiled file, `closure` tells whether
@@ -95,7 +99,7 @@ pex patch <input> --map <FormIDMap> [--dry-run] [--backup]
 pex check --rewrite <input>      read + write, compare byte for byte
 pex check --asm <input> --tools "<game>\Papyrus Compiler"
 pex check --assemble <input> [--tools "<game>\Papyrus Compiler"]
-pex check --compile <SourceDir> --pex <Misc.bsa> --flags <flg>
+pex check --compile <SourceDir> --pex <Misc.bsa> --flags <flg> [--tools "<game>\Papyrus Compiler"]
 pex check --roundtrip <input> --tools "<game>\Papyrus Compiler" [--resolve <Data>]
                                  [--per-script-imports]   (mixed sets: mods)
 ```

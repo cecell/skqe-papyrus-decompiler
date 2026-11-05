@@ -61,6 +61,10 @@ private:
         auto it = m_interned.find(key);
         if (it != m_interned.end()) return it->second;
         StrIdx idx;
+        // The one-letter string "s" is stored as "S" whatever its case, as
+        // the assembler does (docs/ASM_SYNTAX.md; vanilla TrapNorPlatform
+        // concatenates "s" and the file holds "S").
+        if (key == "s") text = "S";
         if (!m_s.intern(text, idx)) error(0, "string table full");
         m_interned.emplace(key, idx);
         return idx;
@@ -138,6 +142,16 @@ private:
             if (st.isAuto) o.autoState = intern(st.name);
         }
 
+        // The compiler's listing has the variable table first, autovars
+        // (lowercased types) ahead of the script's variables, so those
+        // spellings are interned before any property type or doc string
+        // (vanilla MS03OnUnloadScript: the doc string "Quest" is stored as
+        // "quest", the autovar's type).
+        for (const Property& p : m_ast.properties) {
+            if (!p.isAuto) continue;
+            intern("::" + p.name + "_var");
+            intern(lower(type_text(p.type)));
+        }
         for (const Variable& v : m_ast.variables) {
             pex::Variable pv;
             pv.name = intern(v.name);
@@ -147,13 +161,12 @@ private:
             o.variables.push_back(pv);
         }
 
-        for (const Property& p : m_ast.properties) property(o, p);
-
         // The default state: the generated GetState / GotoState, then the
         // script's own functions. Bodies are compiled in source order across
-        // state blocks (temps are numbered in that order: vanilla
-        // BlackreachLockScript's SetOpen, declared after its state blocks,
-        // starts at ::temp5).
+        // properties and state blocks (temps are numbered in that order:
+        // vanilla BlackreachLockScript's SetOpen, declared after its state
+        // blocks, starts at ::temp5; ObjectReference's X getter is numbered
+        // after the functions declared before it).
         pex::State def;
         def.name = intern("");
         generated_state_functions(def);
@@ -166,7 +179,9 @@ private:
             states[i].name = intern(lower(m_ast.states[i].name));
         }
         for (const auto& [kind, index] : m_ast.order) {
-            if (kind == 2) {
+            if (kind == 1) {
+                property(o, m_ast.properties[index]);
+            } else if (kind == 2) {
                 def.functions.push_back(function(m_ast.functions[index], def.name, false));
                 m_pendingRecords.push_back({0, def.name, def.functions.back().name, m_lines});
             } else if (kind == 3) {
