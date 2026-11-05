@@ -2,6 +2,7 @@
 // milestone 2). Function bodies follow in a later milestone; until then every
 // body is empty and compile() says so unless declarationsOnly was asked for.
 // SPDX-License-Identifier: GPL-3.0-only
+#include "dotnet_hashtable.hpp"
 #include "lower.hpp"
 
 #include "codegen.hpp"
@@ -58,16 +59,41 @@ private:
 
     StrIdx intern(std::string_view text) {
         const std::string key = lower(text);
-        auto it = m_interned.find(key);
-        if (it != m_interned.end()) return it->second;
-        StrIdx idx;
         // The one-letter string "s" is stored as "S" whatever its case, as
         // the assembler does (docs/ASM_SYNTAX.md; vanilla TrapNorPlatform
         // concatenates "s" and the file holds "S").
         if (key == "s") text = "S";
+        // The assembler keeps the first spelling it meets in the listing,
+        // and the listing is not in compile order (state blocks come in
+        // Hashtable order, docs/COMPILER_PATTERNS.md): remember where in the
+        // listing each spelling occurs and settle the table at the end.
+        const uint64_t seq = m_seq++;
+        auto sp = m_spelling.find(key);
+        if (sp == m_spelling.end()) m_spelling.emplace(key, Spelling{m_rank, seq, std::string(text)});
+        else if (m_rank < sp->second.rank) sp->second = Spelling{m_rank, seq, std::string(text)};
+        auto it = m_interned.find(key);
+        if (it != m_interned.end()) return it->second;
+        StrIdx idx;
         if (!m_s.intern(text, idx)) error(0, "string table full");
         m_interned.emplace(key, idx);
         return idx;
+    }
+
+    // Bethesda's compiler's listing order of the state blocks: indices into
+    // m_ast.states in .NET 2.0 Hashtable enumeration order (dotnet_hashtable.hpp).
+    std::vector<size_t> state_listing_order() const {
+        std::vector<std::string> keys;
+        for (const State& st : m_ast.states) keys.push_back(lower(st.name));
+        std::vector<size_t> out;
+        for (const std::string& k : dotnet::hashtable20_key_order(keys)) {
+            for (size_t i = 0; i < keys.size(); ++i) {
+                if (keys[i] == k) {
+                    out.push_back(i);
+                    break;
+                }
+            }
+        }
+        return out;
     }
     static std::string type_text(const TypeRef& t) { return t.name + (t.isArray ? "[]" : ""); }
     static std::string type_text(const TypeName& t) { return t.name + (t.isArray ? "[]" : ""); }
@@ -170,21 +196,31 @@ private:
         pex::State def;
         def.name = intern("");
         generated_state_functions(def);
+        // Listing sections, for the spelling rule in intern(): 0 = header,
+        // variables and properties (with their accessors), 1 = the default
+        // state's functions, 2 + n = the n-th state block of the compiler's
+        // Hashtable order.
+        const std::vector<size_t> listing = state_listing_order();
+        std::vector<int> rankOf(m_ast.states.size(), 2);
+        for (size_t p = 0; p < listing.size(); ++p) rankOf[listing[p]] = 2 + static_cast<int>(p);
         std::vector<pex::State> states(m_ast.states.size());
         for (size_t i = 0; i < m_ast.states.size(); ++i) {
-            // The compiler's listing writes state names lowercased; a literal
-            // spelled like a state merges to that spelling when the state
-            // block precedes it in the compiler's (hash-ordered) listing,
-            // which is not reproduced here (docs/COMPILER_PATTERNS.md).
+            // The compiler's listing writes state names lowercased, at the
+            // head of the state's block.
+            m_rank = rankOf[i];
             states[i].name = intern(lower(m_ast.states[i].name));
         }
+        m_rank = 0;
         for (const auto& [kind, index] : m_ast.order) {
             if (kind == 1) {
+                m_rank = 0;
                 property(o, m_ast.properties[index]);
             } else if (kind == 2) {
+                m_rank = 1;
                 def.functions.push_back(function(m_ast.functions[index], def.name, false));
                 m_pendingRecords.push_back({0, def.name, def.functions.back().name, m_lines});
             } else if (kind == 3) {
+                m_rank = rankOf[index];
                 const State& st = m_ast.states[index];
                 pex::State& ps = states[index];
                 bool first = true;
@@ -195,18 +231,26 @@ private:
                 }
             }
         }
+        m_rank = 0;
         o.states.push_back(std::move(def));
         for (pex::State& ps : states) o.states.push_back(std::move(ps));
         // Debug records in the compiler's listing order: accessors (already
-        // recorded), the default state's functions, then the other states.
-        // The merge of same-named records ("last lines win", the label bug)
-        // depends on this order, not on source order.
-        for (size_t block = 0; block <= m_ast.states.size(); ++block) {
+        // recorded), the default state's functions, then the other states in
+        // Hashtable order. The merge of same-named records ("last lines win",
+        // the label bug) depends on this order, not on source order.
+        std::vector<size_t> blocks{0};
+        for (size_t i : listing) blocks.push_back(i + 1);
+        for (size_t block : blocks) {
             for (Pending& r : m_pendingRecords) {
                 if (r.block == block) record(r.label, r.name, pex::FunctionKind::Method, std::move(r.lines));
             }
         }
         m_pendingRecords.clear();
+        // Settle every string's spelling on its first occurrence in the listing.
+        for (const auto& [key, sp] : m_spelling) {
+            auto it = m_interned.find(key);
+            if (it != m_interned.end() && it->second < m_s.strings.size()) m_s.strings[it->second] = sp.text;
+        }
         m_s.objects.push_back(std::move(o));
     }
 
@@ -383,6 +427,14 @@ private:
     pex::Script& m_s;
     StrIdx m_objectName = 0;
     std::unordered_map<std::string, StrIdx> m_interned;
+    struct Spelling {
+        int rank;       // listing section (see object())
+        uint64_t seq;   // intern() call number
+        std::string text;
+    };
+    std::unordered_map<std::string, Spelling> m_spelling;  // key -> earliest occurrence in the listing
+    int m_rank = 0;
+    uint64_t m_seq = 0;
     std::map<std::tuple<StrIdx, StrIdx, int>, size_t> m_records;
     std::vector<uint16_t> m_lines;  // debug lines of the function being compiled
     struct Pending {

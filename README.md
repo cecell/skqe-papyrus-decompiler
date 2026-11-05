@@ -33,12 +33,11 @@ script on a modded machine, and the numbers are in the docs. What it does:
    explains every class of the rest.
 4. **A compiler** for Skyrim's Papyrus (`pex compile`), proved by compiling
    every vanilla source and comparing with the shipped compiled file at
-   model level: **13,396 of 13,975 (95.9%) come back identical**, in 2.7 s
-   for the lot, and 97.6% of the scripts Bethesda's compiler can build from
-   those sources (the shipped sources have drifted for 143 of them); all but
-   one of the rest are the compiler's hash order of state blocks, which
-   decides the case of literals that match a state name. docs/COMPILER.md
-   and docs/ROUNDTRIP.md say what the rest is.
+   model level: **13,708 of 13,975 (98.1%) come back identical**, in 2.9 s
+   for the lot, and **99.98% of the scripts Bethesda's compiler can build
+   from those sources** (the shipped sources have drifted for 131, 133 lack
+   a dependency's source, 3 differ). docs/COMPILER.md and docs/ROUNDTRIP.md
+   say what the rest is.
 5. **The analyses the ESL-compaction tooling needs**, with no compiler
    involved: `refs` lists every FormID literal paired with its plugin name,
    `patch --map` renumbers them in the compiled file, `closure` tells whether

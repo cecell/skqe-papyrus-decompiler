@@ -7,6 +7,7 @@
 #include "papyrus/canon.hpp"
 #include "papyrus/decompile.hpp"
 #include "papyrus/pex.hpp"
+#include "compile/dotnet_hashtable.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -922,6 +923,25 @@ static const char* kElseIfListing =
     "          .endCode\n        .endFunction\n"
     "      .endState\n    .endStateTable\n  .endObject\n.endObjectTable\n";
 
+// The compiler's state-block order is a .NET 2.0 Hashtable's: these are the
+// orders of vanilla scripts' debug records (docs/COMPILER_PATTERNS.md).
+static void test_dotnet_hashtable_order() {
+    auto joined = [](std::vector<std::string> keys) {
+        std::string out;
+        for (const std::string& k : papyrus::dotnet::hashtable20_key_order(keys)) out += (out.empty() ? "" : " ") + k;
+        return out;
+    };
+    CHECK(joined({"Position01", "Position02", "Position03", "Position04", "Position05", "Position06", "Position07", "Position08"}) ==
+          "position07 position05 position06 position01 position02 position08 position03 position04");
+    CHECK(joined({"busy", "ready", "fired"}) == "busy fired ready");
+    CHECK(joined({"empty", "loadedClosed", "loadedOpened", "loadedInscribed", "emptyDone", "busy"}) ==
+          "loadedclosed emptydone loadedopened loadedinscribed busy empty");
+    CHECK(joined({"waitingForActor", "hasBeenTriggered"}) == "waitingforactor hasbeentriggered");
+    CHECK(papyrus::dotnet::string_hash_64("a") == 372029373);
+    CHECK(papyrus::dotnet::string_hash_64("abcd") == -1664220650);
+    CHECK(papyrus::dotnet::string_hash_64("waitingforactor") == 847524731);
+}
+
 static void test_elseif_rule() {
     Script s;
     std::string err;
@@ -975,6 +995,7 @@ int main(int argc, char** argv) {
     test_refs_and_patch();
     test_assemble();
     test_elseif_rule();
+    test_dotnet_hashtable_order();
     if (g_failures) {
         std::fprintf(stderr, "%d failure(s)\n", g_failures);
         return 1;
