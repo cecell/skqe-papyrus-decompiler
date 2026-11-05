@@ -2,6 +2,7 @@
 // cast elision, declarations, precedence-aware rendering, the Event /
 // Function choice, property forms, and the per-function failure stub.
 // SPDX-License-Identifier: GPL-3.0-only
+#include "event_names.hpp"
 #include "ir.hpp"
 #include "papyrus/decompile.hpp"
 #include "papyrus/layout.hpp"
@@ -28,15 +29,6 @@ const char* to_string(FnStatus s) noexcept {
 namespace {
 
 using namespace detail;
-
-const char* const kEventNames[] = {
-#include "event_names.inc"
-};
-
-bool is_known_event(const std::string& lowerName) {
-    return std::binary_search(std::begin(kEventNames), std::end(kEventNames), lowerName.c_str(),
-                              [](const char* a, const char* b) { return std::strcmp(a, b) < 0; });
-}
 
 std::string lower(std::string_view v) { return FnContext::lower(v); }
 
