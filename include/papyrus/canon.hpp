@@ -51,6 +51,9 @@ struct CompareOptions {
     // Compare the header's version and game id. Off for the assembler check:
     // Bethesda's assembler always writes 3.2, and old mods carry 3.1.
     bool compareHeader = true;
+    // Compare declarations only: no locals, instructions or debug line
+    // counts (the compiler's milestone 2, docs/COMPILER.md).
+    bool declarationsOnly = false;
     // Stop after this many differences (0 = all).
     size_t maxDifferences = 50;
 };

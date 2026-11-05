@@ -19,6 +19,10 @@ add_library(skqe_papyrus STATIC
     src/json_writer.cpp
     src/asm_writer.cpp
     src/assembler.cpp
+    src/compile/lexer.cpp
+    src/compile/parser.cpp
+    src/compile/compile.cpp
+    src/compile/lower.cpp
     src/canon.cpp
     src/layout.cpp
     src/decompile/lift.cpp

@@ -7,13 +7,16 @@
 #include "papyrus/analysis.hpp"
 #include "papyrus/assemble.hpp"
 #include "papyrus/canon.hpp"
+#include "papyrus/compile.hpp"
 #include "papyrus/decompile.hpp"
 #include "papyrus/pex.hpp"
 #include "process.hpp"
 #include "resolver.hpp"
 #include "roundtrip.hpp"
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <memory>
 #include <cstdio>
@@ -95,6 +98,18 @@ commands
                                from <dir> (the game's "Papyrus Compiler"
                                folder) and compare the result with the
                                original at model level
+  compile <psc|dir> [--import <dir;dir>] [--flags <flg>] [--out <dir>] [--declarations]
+                               our compiler: .psc to .pex (the source's own
+                               folder is always an import folder); with
+                               --declarations every function body is left empty
+  check --parse <SourceDir>    parse every .psc below the folder with the compiler
+                               front end; lists the files it cannot parse
+  check --compile <SourceDir> --pex <input> [--import <dir;dir>] [--flags <flg>]
+            [--declarations]
+                               compile every source that has a compiled
+                               counterpart in <input> with our compiler and
+                               compare with it at model level; prints the share
+                               identical (--declarations: declarations only)
   check --assemble <input> [--tools <dir>]
                                assemble our listing with our own assembler
                                and compare with the original at model level,
@@ -139,6 +154,10 @@ struct Options {
     bool rewrite = false;
     bool asmCheck = false;
     bool assembleCheck = false;
+    bool parseCheck = false;
+    bool compileCheck = false;
+    bool declarations = false;
+    std::string pexInput;
     bool roundtrip = false;
     bool perScript = false;
     std::string imports;
@@ -172,6 +191,10 @@ bool parse(int argc, char** argv, int from, Options& o, const char* cmd) {
         else if (a == "--rewrite") o.rewrite = true;
         else if (a == "--asm") o.asmCheck = true;
         else if (a == "--assemble") o.assembleCheck = true;
+        else if (a == "--parse") o.parseCheck = true;
+        else if (a == "--compile") o.compileCheck = true;
+        else if (a == "--declarations") o.declarations = true;
+        else if (a == "--pex" && hasNext) o.pexInput = argv[++i];
         else if (a == "--roundtrip") o.roundtrip = true;
         else if (a == "--per-script-imports") o.perScript = true;
         else if (a == "--import" && hasNext) o.imports = argv[++i];
@@ -813,12 +836,287 @@ int check_assemble(const Options& o, const std::vector<pextool::Item>& items) {
     return tally.finish(items.size(), std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
 }
 
+std::vector<std::string> split_list(const std::string& s, char sep);
+
+// .psc files below the inputs (files or folders), sorted.
+std::vector<fs::path> source_files(const Options& o, std::vector<fs::path>* folders) {
+    std::vector<fs::path> files;
+    std::error_code ec;
+    for (const std::string& in : o.inputs) {
+        const fs::path p = fs::u8path(in);
+        if (fs::is_regular_file(p, ec)) {
+            files.push_back(p);
+            if (folders) folders->push_back(p.parent_path());
+            continue;
+        }
+        if (!fs::is_directory(p, ec)) {
+            std::fprintf(stderr, "%s: does not exist\n", in.c_str());
+            return {};
+        }
+        if (folders) folders->push_back(p);
+        for (const fs::directory_entry& e : fs::recursive_directory_iterator(p, ec)) {
+            if (!e.is_regular_file(ec)) continue;
+            std::string ext = e.path().extension().string();
+            for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (ext == ".psc") files.push_back(e.path());
+        }
+    }
+    std::sort(files.begin(), files.end());
+    return files;
+}
+
+std::string lower_ascii(std::string s) {
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+// The compile options shared by `compile` and `check --compile`: flags file,
+// import folders (the sources' own folders first, then --import).
+struct CompileSetup {
+    std::vector<psc::UserFlagDef> flags;
+    std::vector<fs::path> imports;
+    bool ok = false;
+};
+
+CompileSetup compile_setup(const Options& o, const std::vector<fs::path>& sourceFolders) {
+    CompileSetup s;
+    if (o.flags.empty()) {
+        std::fprintf(stderr, "compile needs --flags <TESV_Papyrus_Flags.flg>\n");
+        return s;
+    }
+    std::string text;
+    {
+        std::ifstream f(fs::u8path(o.flags), std::ios::binary);
+        if (!f) {
+            std::fprintf(stderr, "cannot read %s\n", o.flags.c_str());
+            return s;
+        }
+        text.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    }
+    std::string err;
+    if (!psc::load_flags(text, s.flags, &err)) {
+        std::fprintf(stderr, "%s: %s\n", o.flags.c_str(), err.c_str());
+        return s;
+    }
+    for (const fs::path& p : sourceFolders) {
+        if (std::find(s.imports.begin(), s.imports.end(), p) == s.imports.end()) s.imports.push_back(p);
+    }
+    for (const std::string& dir : split_list(o.imports, ';')) s.imports.push_back(fs::u8path(dir));
+    s.ok = true;
+    return s;
+}
+
+psc::SourceFile read_source(const fs::path& p) {
+    psc::SourceFile src;
+    std::ifstream f(p, std::ios::binary);
+    src.text.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    src.name = p.stem().string();
+    src.path = p.string();
+    std::error_code ec;
+    const auto t = fs::last_write_time(p, ec);
+    if (!ec) {
+        const auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+            t - fs::file_time_type::clock::now() + std::chrono::system_clock::now());
+        src.modified = static_cast<uint64_t>(std::chrono::system_clock::to_time_t(sctp));
+    }
+    return src;
+}
+
+int cmd_compile(int argc, char** argv) {
+    Options o;
+    if (!parse(argc, argv, 2, o, "compile")) return 2;
+    if (o.inputs.empty()) {
+        std::fprintf(stderr, "no input given\n");
+        return 2;
+    }
+    std::vector<fs::path> folders;
+    const std::vector<fs::path> files = source_files(o, &folders);
+    if (files.empty()) return 2;
+    const CompileSetup setup = compile_setup(o, folders);
+    if (!setup.ok) return 2;
+    std::error_code ec;
+    const bool toDir = files.size() > 1 || (!o.out.empty() && fs::is_directory(fs::u8path(o.out), ec));
+    if (toDir && o.out.empty()) {
+        std::fprintf(stderr, "compile: %zu sources; give --out <directory>\n", files.size());
+        return 2;
+    }
+    if (toDir) fs::create_directories(fs::u8path(o.out), ec);
+    std::unique_ptr<psc::SourceResolver> resolver = psc::folder_resolver(setup.imports);
+    psc::CompileOptions co;
+    co.flags = setup.flags;
+    co.resolver = resolver.get();
+    co.declarationsOnly = o.declarations;
+    int failures = 0;
+    for (const fs::path& in : files) {
+        pex::Script s;
+        std::vector<psc::Diagnostic> diags;
+        const bool ok = psc::compile(read_source(in), co, s, diags);
+        for (const psc::Diagnostic& d : diags) std::fprintf(stderr, "%s\n", d.text().c_str());
+        if (!ok) {
+            ++failures;
+            continue;
+        }
+        fs::path target;
+        if (o.out.empty()) target = fs::path(in).replace_extension(".pex");
+        else if (toDir) target = fs::u8path(o.out) / in.filename().replace_extension(".pex");
+        else target = fs::u8path(o.out);
+        std::string err;
+        if (pex::write_file(s, target, &err) != pex::Status::Ok) {
+            std::fprintf(stderr, "%s: cannot write %s: %s\n", in.string().c_str(), target.string().c_str(), err.c_str());
+            ++failures;
+        }
+    }
+    return failures ? 1 : 0;
+}
+
+// Every source with a compiled counterpart in --pex, compiled with our
+// compiler and compared with it canonically.
+int check_compile(const Options& o) {
+    if (o.pexInput.empty()) {
+        std::fprintf(stderr, "check --compile needs --pex <compiled scripts: file, folder or .bsa>\n");
+        return 2;
+    }
+    std::vector<fs::path> folders;
+    const std::vector<fs::path> files = source_files(o, &folders);
+    if (files.empty()) return 2;
+    const CompileSetup setup = compile_setup(o, folders);
+    if (!setup.ok) return 2;
+    std::vector<pextool::Item> items;
+    std::vector<std::string> warnings;
+    if (!pextool::enumerate(fs::u8path(o.pexInput), items, warnings)) {
+        std::fprintf(stderr, "--pex %s: does not exist\n", o.pexInput.c_str());
+        return 2;
+    }
+    items = pextool::effective_scripts(items);
+    std::map<std::string, size_t> byStem;
+    for (size_t i = 0; i < items.size(); ++i) byStem[lower_ascii(fs::path(items[i].name).stem().string())] = i;
+    // The sources that have a counterpart.
+    std::vector<std::pair<fs::path, size_t>> work;
+    for (const fs::path& f : files) {
+        auto it = byStem.find(lower_ascii(f.stem().string()));
+        if (it != byStem.end()) work.emplace_back(f, it->second);
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    Tally tally;
+    tally.quiet = o.quiet;
+    std::atomic<size_t> nextIndex{0};
+    std::mutex mu;
+    const unsigned threads = o.threads ? o.threads : std::max(1u, std::thread::hardware_concurrency());
+    std::vector<std::thread> pool;
+    for (unsigned t = 0; t < threads; ++t) {
+        pool.emplace_back([&] {
+            pextool::Loader ld;
+            std::unique_ptr<psc::SourceResolver> resolver = psc::folder_resolver(setup.imports);
+            psc::CompileOptions co;
+            co.flags = setup.flags;
+            co.resolver = resolver.get();
+            co.declarationsOnly = o.declarations;
+            for (;;) {
+                const size_t i = nextIndex++;
+                if (i >= work.size()) return;
+                const pextool::Item& it = items[work[i].second];
+                pex::Script original;
+                if (!load_script(it, ld, original, mu)) {
+                    tally.fail(it, "unreadable", "");
+                    continue;
+                }
+                pex::Script ours;
+                std::vector<psc::Diagnostic> diags;
+                if (!psc::compile(read_source(work[i].first), co, ours, diags)) {
+                    tally.fail(it, "compile error", diags.empty() ? "" : diags.front().text());
+                    continue;
+                }
+                std::vector<pex::Difference> diffs;
+                pex::CompareOptions cmp;
+                cmp.compareHeader = false;
+                cmp.declarationsOnly = o.declarations;
+                if (!pex::canonical_equal(original, ours, &diffs, cmp)) {
+                    tally.fail(it, std::string(pex::to_string(diffs.front().kind)) + " diff", difference_text(diffs));
+                    continue;
+                }
+                tally.pass();
+            }
+        });
+    }
+    for (std::thread& t : pool) t.join();
+    std::fprintf(stdout, "sources %zu  with a compiled counterpart %zu\n", files.size(), work.size());
+    return tally.finish(work.size(), std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+}
+
+// Every .psc below the given folders, parsed with the compiler front end.
+int check_parse(const Options& o) {
+    std::vector<fs::path> files;
+    std::error_code ec;
+    for (const std::string& in : o.inputs) {
+        const fs::path p = fs::u8path(in);
+        if (fs::is_regular_file(p, ec)) {
+            files.push_back(p);
+            continue;
+        }
+        if (!fs::is_directory(p, ec)) {
+            std::fprintf(stderr, "%s: does not exist\n", in.c_str());
+            return 2;
+        }
+        for (const fs::directory_entry& e : fs::recursive_directory_iterator(p, ec)) {
+            if (!e.is_regular_file(ec)) continue;
+            std::string ext = e.path().extension().string();
+            for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (ext == ".psc") files.push_back(e.path());
+        }
+    }
+    std::sort(files.begin(), files.end());
+    const auto t0 = std::chrono::steady_clock::now();
+    std::atomic<size_t> ok{0}, bad{0};
+    std::mutex mu;
+    std::map<std::string, size_t> byMessage;
+    const unsigned threads = o.threads ? o.threads : std::max(1u, std::thread::hardware_concurrency());
+    std::atomic<size_t> nextIndex{0};
+    std::vector<std::thread> pool;
+    for (unsigned t = 0; t < threads; ++t) {
+        pool.emplace_back([&] {
+            for (;;) {
+                const size_t i = nextIndex++;
+                if (i >= files.size()) return;
+                std::string text;
+                {
+                    std::ifstream f(files[i], std::ios::binary);
+                    text.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+                }
+                psc::ScriptPtr tree;
+                psc::Diagnostic d;
+                if (psc::parse(text, files[i].filename().string(), tree, d)) {
+                    ++ok;
+                    continue;
+                }
+                ++bad;
+                std::lock_guard<std::mutex> lk(mu);
+                std::string key = d.message;
+                if (key.size() > 40) key = key.substr(0, 40);
+                ++byMessage[key];
+                if (!o.quiet) std::fprintf(stdout, "%s\n", d.text().c_str());
+            }
+        });
+    }
+    for (std::thread& t : pool) t.join();
+    for (const auto& [k, v] : byMessage) std::fprintf(stdout, "  %-42s %zu\n", k.c_str(), v);
+    std::fprintf(stdout, "files %zu  parsed %zu  failed %zu  %.1fs\n", files.size(), ok.load(), bad.load(),
+                 std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+    return bad ? 1 : 0;
+}
+
 int cmd_check(int argc, char** argv) {
     Options o;
     if (!parse(argc, argv, 2, o, "check")) return 2;
-    if (int(o.rewrite) + int(o.asmCheck) + int(o.assembleCheck) + int(o.roundtrip) != 1) {
-        std::fprintf(stderr, "check: give exactly one of --rewrite, --asm, --assemble, --roundtrip (pex help)\n");
+    if (int(o.rewrite) + int(o.asmCheck) + int(o.assembleCheck) + int(o.roundtrip) + int(o.parseCheck) + int(o.compileCheck) != 1) {
+        std::fprintf(stderr, "check: give exactly one of --rewrite, --asm, --assemble, --parse, --compile, --roundtrip (pex help)\n");
         return 2;
+    }
+    if (o.parseCheck || o.compileCheck) {
+        if (o.inputs.empty()) {
+            std::fprintf(stderr, "no input given\n");
+            return 2;
+        }
+        return o.parseCheck ? check_parse(o) : check_compile(o);
     }
     std::vector<pextool::Item> items;
     if (!collect(o, items)) return 2;
@@ -1230,6 +1528,7 @@ int main(int argc, char** argv_) {
     if (cmd == "json") return cmd_render(argc, argv.data(), "json", ".json", render_json);
     if (cmd == "asm") return cmd_render(argc, argv.data(), "asm", ".pas", render_asm);
     if (cmd == "assemble") return cmd_assemble(argc, argv.data());
+    if (cmd == "compile") return cmd_compile(argc, argv.data());
     if (cmd == "decompile") return cmd_decompile(argc, argv.data());
     if (cmd == "refs") return cmd_refs(argc, argv.data());
     if (cmd == "deps") return cmd_deps(argc, argv.data());

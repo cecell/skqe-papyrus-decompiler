@@ -287,6 +287,7 @@ public:
             add(DiffKind::Function, where, msg);
             return;
         }
+        if (m_opt.declarationsOnly) return;
         if (a.locals != b.locals) {
             std::string msg = "locals differ:";
             for (const auto& l : a.locals) {
@@ -383,7 +384,7 @@ public:
         if (a.debug != b.debug) {
             add(DiffKind::DebugInfo, "", std::string("debug info ") + (a.debug ? "present" : "absent") + " in A, " +
                                              (b.debug ? "present" : "absent") + " in B");
-        } else if (a.debug && a.debugLines != b.debugLines) {
+        } else if (a.debug && !m_opt.declarationsOnly && a.debugLines != b.debugLines) {
             for (const auto& [k, n] : a.debugLines) {
                 auto it = b.debugLines.find(k);
                 const std::string where = std::get<0>(k) + "." + std::get<1>(k) + "." + std::get<2>(k);
