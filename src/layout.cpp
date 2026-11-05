@@ -3,7 +3,10 @@
 #include "papyrus/layout.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <limits>
+
+#include "compile/dotnet_hashtable.hpp"
 
 namespace papyrus::pex {
 
@@ -107,6 +110,50 @@ SourceLayout source_layout(const Script& s, const Object& o) {
     }
     out.properties = order_by(o.properties.size(), [&](size_t i) { return propKey[i]; });
     return out;
+}
+
+std::vector<size_t> source_state_order(const Script& s, const Object& o, const SourceLayout& layout) {
+    std::vector<size_t> order = layout.states;
+    if (!layout.fromDebugInfo || order.size() < 2) return order;
+    size_t first = 0;
+    if (!order.empty() && s.str(o.states[order[0]].name).empty()) first = 1;
+    std::vector<size_t> named(order.begin() + first, order.end());
+    if (named.size() < 2 || named.size() > 8) return order;
+    auto keys_of = [&](const std::vector<size_t>& states) {
+        std::vector<std::string> keys;
+        for (size_t si : states) {
+            std::string k(s.str(o.states[si].name));
+            for (char& ch : k) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            keys.push_back(k);
+        }
+        return keys;
+    };
+    // Only states with a function have a debug record, so only their
+    // relative order is known; a state without functions may land anywhere
+    // (vanilla DLC2DunFloorPathPuzzleSCRIPT: `State Done` is empty, and the
+    // records only say busy before WaitingToBeActivated).
+    auto constrained = [&](const std::vector<std::string>& keys) {
+        std::vector<std::string> out;
+        for (const std::string& k : keys) {
+            for (size_t si : named) {
+                std::string n(s.str(o.states[si].name));
+                for (char& ch : n) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                if (n == k && !o.states[si].functions.empty()) out.push_back(k);
+            }
+        }
+        return out;
+    };
+    const std::vector<std::string> listing = constrained(keys_of(named));
+    if (constrained(dotnet::hashtable20_key_order(keys_of(named))) == listing) return order;
+    std::vector<size_t> trial = named;
+    std::sort(trial.begin(), trial.end());
+    do {
+        if (constrained(dotnet::hashtable20_key_order(keys_of(trial))) == listing) {
+            std::copy(trial.begin(), trial.end(), order.begin() + first);
+            return order;
+        }
+    } while (std::next_permutation(trial.begin(), trial.end()));
+    return order;
 }
 
 }  // namespace papyrus::pex

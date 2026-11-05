@@ -299,14 +299,15 @@ private:
         } else {
             if (!varFlags.empty()) error(p.line, "flag " + varFlags[0] + " is not allowed on a property with accessors");
             pp.flags = 0;
-            if (p.getter) {
-                pp.flags |= pex::kPropRead;
-                pp.getter = accessor(*p.getter, pp.name, pex::FunctionKind::Getter);
-            }
-            if (p.setter) {
-                pp.flags |= pex::kPropWrite;
-                pp.setter = accessor(*p.setter, pp.name, pex::FunctionKind::Setter);
-            }
+            if (p.getter) pp.flags |= pex::kPropRead;
+            if (p.setter) pp.flags |= pex::kPropWrite;
+            // The accessors are compiled in source order: their temps continue
+            // the object's numbering (mod _DS_HB_Globals writes Set before
+            // Get, and the setter holds ::temp77, the getter 78 and 79).
+            const bool setFirst = p.getter && p.setter && p.setter->line < p.getter->line;
+            if (setFirst) pp.setter = accessor(*p.setter, pp.name, pex::FunctionKind::Setter);
+            if (p.getter) pp.getter = accessor(*p.getter, pp.name, pex::FunctionKind::Getter);
+            if (p.setter && !setFirst) pp.setter = accessor(*p.setter, pp.name, pex::FunctionKind::Setter);
         }
         o.properties.push_back(std::move(pp));
     }
@@ -335,7 +336,7 @@ private:
         }
         m_lines.clear();
         if (!f.isNative && !m_opt.declarationsOnly) {
-            ObjectContext ctx{m_s, m_prog, m_info, [this](std::string_view t) { return intern(t); }, m_tempCounter};
+            ObjectContext ctx{m_s, m_prog, m_info, [this](std::string_view t) { return intern(t); }, m_tempCounter, m_mangleCounter};
             // A property accessor is not in the interface: describe it here.
             FuncInfo own;
             const FuncInfo* fi = m_info.own_function(f.name);
@@ -352,6 +353,7 @@ private:
             }
             compile_body(ctx, f, *fi, pf, m_lines);
             m_tempCounter = ctx.tempCounter;
+            m_mangleCounter = ctx.mangleCounter;
         }
         if (withRecord) record(label, nf.name, pex::FunctionKind::Method, m_lines);
         return nf;
@@ -444,6 +446,7 @@ private:
     };
     std::vector<Pending> m_pendingRecords;
     int m_tempCounter = 0;          // ::tempN numbering, one counter per object
+    int m_mangleCounter = 0;        // ::mangled_<name>_N numbering, likewise
     bool m_bodiesSkipped = false;
 };
 

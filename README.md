@@ -27,17 +27,19 @@ script on a modded machine, and the numbers are in the docs. What it does:
    a function that does not is emitted as a stub with its assembly, never
    taking the file with it. The score that matters is the round trip:
    decompile, compile with `PapyrusCompiler.exe`, compare with the original
-   at model level: **14,020 of the 14,026 vanilla scripts (99.96%) come back
+   at model level: **14,021 of the 14,026 vanilla scripts (99.96%) come back
    identical**, and over the whole modded folder **75,125 of 76,593 (98.08%;
    99.0% of those whose dependencies exist at all)**; docs/ROUNDTRIP.md
    explains every class of the rest.
 4. **A compiler** for Skyrim's Papyrus (`pex compile`), proved by compiling
    every vanilla source and comparing with the shipped compiled file at
-   model level: **13,708 of 13,975 (98.1%) come back identical**, in 2.9 s
-   for the lot, and **99.98% of the scripts Bethesda's compiler can build
+   model level: **13,711 of 13,975 (98.1%) come back identical**, in 2.9 s
+   for the lot, and **every one of the scripts Bethesda's compiler can build
    from those sources** (the shipped sources have drifted for 131, 133 lack
-   a dependency's source, 3 differ). docs/COMPILER.md and docs/ROUNDTRIP.md
-   say what the rest is.
+   a dependency's source, none differs). Over the two mod source folders of
+   the modded `Data` the same holds: 6,101 of 6,883 and 9,373 of 10,168
+   identical, none differing from what `PapyrusCompiler.exe` produces today.
+   docs/COMPILER.md and docs/ROUNDTRIP.md say what the rest is.
 5. **The analyses the ESL-compaction tooling needs**, with no compiler
    involved: `refs` lists every FormID literal paired with its plugin name,
    `patch --map` renumbers them in the compiled file, `closure` tells whether

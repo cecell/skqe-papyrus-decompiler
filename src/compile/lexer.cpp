@@ -84,7 +84,12 @@ public:
                 if (!string(err)) return false;
                 continue;
             }
-            if (is_digit(c) || (c == '.' && m_i + 1 < m_t.size() && is_digit(m_t[m_i + 1]))) {
+            // A minus sign directly before a digit is part of the number
+            // (the compiler's INTEGER and FLOAT tokens): `-90 as Float` casts
+            // the literal -90, `- 90` negates 90 at run time, and `a -1` is a
+            // syntax error (PapyrusCompiler on the Toccata mod and a probe).
+            if (is_digit(c) || (c == '.' && m_i + 1 < m_t.size() && is_digit(m_t[m_i + 1])) ||
+                (c == '-' && m_i + 1 < m_t.size() && is_digit(m_t[m_i + 1]))) {
                 if (!number(err)) return false;
                 continue;
             }
@@ -217,7 +222,9 @@ private:
         Token t;
         t.line = m_line;
         t.column = m_col;
-        if (m_t[j] == '0' && j + 1 < m_t.size() && (m_t[j + 1] == 'x' || m_t[j + 1] == 'X')) {
+        const bool negative = m_t[j] == '-';
+        if (negative) ++j;
+        if (!negative && m_t[j] == '0' && j + 1 < m_t.size() && (m_t[j + 1] == 'x' || m_t[j + 1] == 'X')) {
             j += 2;
             const size_t start = j;
             while (j < m_t.size() && std::isxdigit(static_cast<unsigned char>(m_t[j]))) ++j;
@@ -292,6 +299,59 @@ bool lex(std::string_view text, std::vector<Token>& out, LexError& error) {
     out.clear();
     Lexer l(text, out);
     return l.run(error);
+}
+
+
+std::string decode_source(std::string_view b) {
+    auto byte = [&](size_t i) { return static_cast<unsigned char>(b[i]); };
+    if (b.size() >= 3 && byte(0) == 0xEF && byte(1) == 0xBB && byte(2) == 0xBF) return std::string(b.substr(3));
+    std::string out;
+    auto put = [&](uint32_t cp) {
+        if (cp < 0x80) {
+            out.push_back(static_cast<char>(cp));
+        } else if (cp < 0x800) {
+            out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        } else if (cp < 0x10000) {
+            out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+            out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        } else {
+            out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+            out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        }
+    };
+    if (b.size() >= 2 && ((byte(0) == 0xFF && byte(1) == 0xFE) || (byte(0) == 0xFE && byte(1) == 0xFF))) {
+        const bool le = byte(0) == 0xFF;
+        out.reserve(b.size() / 2);
+        for (size_t i = 2; i + 1 < b.size(); i += 2) {
+            uint32_t u = le ? (byte(i) | (byte(i + 1) << 8)) : ((byte(i) << 8) | byte(i + 1));
+            if (u >= 0xD800 && u < 0xDC00 && i + 3 < b.size()) {
+                const uint32_t lo = le ? (byte(i + 2) | (byte(i + 3) << 8)) : ((byte(i + 2) << 8) | byte(i + 3));
+                if (lo >= 0xDC00 && lo < 0xE000) {
+                    u = 0x10000 + ((u - 0xD800) << 10) + (lo - 0xDC00);
+                    i += 2;
+                }
+            }
+            put(u);
+        }
+        return out;
+    }
+    // Windows-1252: 0x80..0x9F map to these code points (the five undefined
+    // bytes come out as the C1 controls, as .NET decodes them); 0xA0..0xFF
+    // are the same code points as Latin-1.
+    static const uint16_t kHigh[32] = {0x20AC, 0x0081, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160,
+                                       0x2039, 0x0152, 0x008D, 0x017D, 0x008F, 0x0090, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022,
+                                       0x2013, 0x2014, 0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x009D, 0x017E, 0x0178};
+    out.reserve(b.size());
+    for (size_t i = 0; i < b.size(); ++i) {
+        const unsigned char c = byte(i);
+        if (c < 0x80) out.push_back(static_cast<char>(c));
+        else put(c < 0xA0 ? kHigh[c - 0x80] : c);
+    }
+    return out;
 }
 
 }  // namespace papyrus::psc

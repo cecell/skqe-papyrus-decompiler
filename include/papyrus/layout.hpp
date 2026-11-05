@@ -35,4 +35,15 @@ struct SourceLayout {
 
 SourceLayout source_layout(const Script& script, const Object& object);
 
+// The order to write the state blocks in a source file: `layout.states`,
+// except that the compiler lists state blocks in .NET Hashtable order
+// (src/compile/dotnet_hashtable.hpp), which depends on the order the blocks
+// were inserted (the source order) when keys collide. This returns a source
+// order whose Hashtable order is the recorded listing order, so that a
+// recompile lists the blocks, and merges the case of the strings they share,
+// as the original did (vanilla MG06Dome01Script: "Position03" stays
+// capitalised). Equal to layout.states when that is its own fixed point or
+// has more than eight named states; the default state stays first.
+std::vector<size_t> source_state_order(const Script& script, const Object& object, const SourceLayout& layout);
+
 }  // namespace papyrus::pex

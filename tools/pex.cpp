@@ -117,11 +117,12 @@ commands
                                original at model level
   compile <psc|dir> [--import <dir;dir>] [--flags <flg>] [--out <dir>] [--declarations]
             [--resolve <dir|bsa>]
-                               our compiler: .psc to .pex (the source's own
-                               folder is always an import folder; a dependency
-                               without source is taken from its compiled file
-                               in --resolve); with --declarations every
-                               function body is left empty
+                               our compiler: .psc to .pex (--import folders are
+                               searched first, as PapyrusCompiler's -i list, then
+                               the source's own folder; a dependency without
+                               source is taken from its compiled file in
+                               --resolve); with --declarations every function
+                               body is left empty
   check --parse <SourceDir>    parse every .psc below the folder with the compiler
                                front end; lists the files it cannot parse
   check --compile <SourceDir> --pex <input> [--import <dir;dir>] [--flags <flg>]
@@ -900,7 +901,9 @@ std::string lower_ascii(std::string s) {
 }
 
 // The compile options shared by `compile` and `check --compile`: flags file,
-// import folders (the sources' own folders first, then --import).
+// import folders: --import first (as PapyrusCompiler's -i list, the first
+// folder that has a script wins, so SKSE's sources can override vanilla
+// declarations), then the sources' own folders.
 struct CompileSetup {
     std::vector<psc::UserFlagDef> flags;
     std::vector<fs::path> imports;
@@ -927,10 +930,10 @@ CompileSetup compile_setup(const Options& o, const std::vector<fs::path>& source
         std::fprintf(stderr, "%s: %s\n", o.flags.c_str(), err.c_str());
         return s;
     }
+    for (const std::string& dir : split_list(o.imports, ';')) s.imports.push_back(fs::u8path(dir));
     for (const fs::path& p : sourceFolders) {
         if (std::find(s.imports.begin(), s.imports.end(), p) == s.imports.end()) s.imports.push_back(p);
     }
-    for (const std::string& dir : split_list(o.imports, ';')) s.imports.push_back(fs::u8path(dir));
     s.ok = true;
     return s;
 }

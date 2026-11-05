@@ -22,6 +22,7 @@ struct ObjectContext {
     const ScriptInfo& self;
     std::function<pex::StrIdx(std::string_view)> intern;
     int tempCounter = 0;
+    int mangleCounter = 0;  // ::mangled_<name>_N numbers over the whole script
 };
 
 // Compiles `f`'s body into `pf` (locals and code); one debug line per

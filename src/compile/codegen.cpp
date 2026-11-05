@@ -6,6 +6,8 @@
 
 #include <deque>
 #include <map>
+#include <set>
+#include <unordered_map>
 
 namespace papyrus::psc {
 
@@ -51,6 +53,7 @@ public:
             m_scopes.back()[lower(p.name)] = s;
         }
         m_scopes.emplace_back();  // the body's own scope, apart from the parameters
+        plan_mangling();
         for (const StmtPtr& st : m_f.body) statement(*st);
         resolve_jumps();
     }
@@ -141,6 +144,7 @@ private:
     struct Slot {
         StrIdx pexName = 0;
         TypeRef type;
+        bool mangled = false;  // ::mangled_<name>_N: uses keep that name, not the source spelling
     };
 
     Operand alloc(const TypeRef& t) {
@@ -191,22 +195,58 @@ private:
         return nullptr;
     }
 
-    void declare_local(const TypeName& t, const std::string& name, int line) {
-        const std::string key = lower(name);
-        if (m_scopes.back().count(key)) error(line, "variable " + name + " already declared in this scope");
-        if (find_local(name)) error(line, "variable " + name + " hides a variable of an enclosing scope");
-        Slot s;
-        s.type = TypeRef::of(t);
-        std::string pexName = name;
-        if (m_localNames.count(key)) {
-            // The same name declared again in another scope of the function:
-            // the first keeps the name, the next ones are ::mangled_<name>_N
-            // with one counter per function over all names (vanilla
-            // ArenaScript.PickNextFight: fightIndex, _0, _1, _2;
-            // pEmperorDecoyScript.OnDeath: ::mangled_script_0, ::mangled_decoy_1).
-            pexName = "::mangled_" + name + "_" + std::to_string(m_mangled++);
+    // Local renaming, as the shipped scripts show it: before a body is generated, the
+    // function's scopes are walked in pre-order (a scope's own declarations
+    // in source order, then its child blocks in order), and a local whose
+    // lowercased name was met anywhere earlier in that walk becomes
+    // ::mangled_<name>_N, N counting over the whole script (mod
+    // TT_Skyrim_QuestScript reaches _71). So the inner block's local loses
+    // even when it is declared first (mod OL11_KatriaMezzanineRadarScript:
+    // `Actor KatriaActor` inside an If, then again at function level, and
+    // the inner one is ::mangled_katriaactor_0); vanilla
+    // ArenaScript.PickNextFight: fightIndex, _0, _1, _2.
+    void plan_mangling() {
+        std::set<std::string> seen;
+        for (const Param& p : m_f.params) seen.insert(lower(p.name));
+        plan_block(m_f.body, seen);
+    }
+
+    void plan_block(const std::vector<StmtPtr>& body, std::set<std::string>& seen) {
+        for (const StmtPtr& st : body) {
+            if (st->kind != StmtKind::Decl) continue;
+            const std::string key = lower(st->declName);
+            if (seen.count(key)) {
+                // The name is the scope dictionary's key, which is lowercased
+                // (mod TT_Skyrim_QuestScript: `FormList akList` -> ::mangled_aklist_0).
+                m_mangledNames[st.get()] = "::mangled_" + key + "_" + std::to_string(m_c.mangleCounter++);
+            } else {
+                seen.insert(key);
+            }
         }
-        ++m_localNames[key];
+        for (const StmtPtr& st : body) {
+            if (st->kind == StmtKind::If) {
+                plan_block(st->body, seen);
+                for (const ElseIf& ei : st->elseIfs) plan_block(ei.body, seen);
+                if (st->hasElse) plan_block(st->elseBody, seen);
+            } else if (st->kind == StmtKind::While) {
+                plan_block(st->body, seen);
+            }
+        }
+    }
+
+    void declare_local(const Stmt& st) {
+        const std::string& name = st.declName;
+        const std::string key = lower(name);
+        if (m_scopes.back().count(key)) error(st.line, "variable " + name + " already declared in this scope");
+        if (find_local(name)) error(st.line, "variable " + name + " hides a variable of an enclosing scope");
+        Slot s;
+        s.type = TypeRef::of(st.declType);
+        std::string pexName = name;
+        auto m = m_mangledNames.find(&st);
+        if (m != m_mangledNames.end()) {
+            pexName = m->second;
+            s.mangled = true;
+        }
         s.pexName = m_c.intern(pexName);
         pex::Param l;
         l.name = s.pexName;
@@ -259,50 +299,56 @@ private:
         std::string typeName;               // Type
     };
 
-    // A property, own or inherited, wins over a local or parameter of the
-    // same name (vanilla PhysicsTrap: `int damage` declared, `damage = ...`
-    // compiles to the parent's `::damage_var`; dunMiddenHandSculptureSCRIPT:
-    // `float x = ...; return x` reads ObjectReference's X property).
+    // Name resolution as Bethesda's compiler does it, proved by the vanilla and
+    // mod scripts named below: in a function that is not global
+    // a property, own or inherited, comes first (vanilla PhysicsTrap: `int
+    // damage` declared, `damage = ...` compiles to the parent's
+    // `::damage_var`; dunMiddenHandSculptureSCRIPT: `float x = ...; return x`
+    // reads ObjectReference's X property; mod DoorAutoCloseScript: the
+    // parameter Door00 loses to the auto property's `::Door00_var`), then the
+    // parameters and locals, then the script's own variables. A global
+    // function sees only its parameters and locals (vanilla
+    // dunYngolGlowAttractTrig: the parameter moteList, not the property of
+    // that name).
     Name resolve(const std::string& ident, int line) {
         Name n;
+        if (!m_f.isGlobal) {
+            const ScriptInfo* owner = nullptr;
+            if (const PropInfo* p = m_prog.find_property(m_self, ident, &owner)) {
+                n.prop = p;
+                n.owner = owner;
+                n.type = p->type;
+                // An auto property, own or inherited, is the backing variable
+                // (vanilla RPDefault_LLInjection_Ammo reads the parent's
+                // ::InjectAtLevel_var directly).
+                if (p->isAuto) {
+                    n.kind = NameKind::AutoProp;
+                    n.pexName = m_c.intern("::" + p->name + "_var");
+                } else {
+                    n.kind = NameKind::Property;
+                }
+                return n;
+            }
+        }
         if (const Slot* s = find_param(ident)) {
-            // A parameter wins over everything (vanilla dunYngolGlowAttractTrig:
-            // the parameter moteList, not the property of that name).
             n.kind = NameKind::Local;
-            n.pexName = s->pexName;
+            n.pexName = m_c.intern(ident);
             n.type = s->type;
             return n;
         }
-        const ScriptInfo* owner = nullptr;
-        const PropInfo* p = m_prog.find_property(m_self, ident, &owner);
-        if (!p) {
-            if (const Slot* s = find_local(ident)) {
-                n.kind = NameKind::Local;
-                n.pexName = s->pexName;
-                n.type = s->type;
-                return n;
-            }
+        if (const Slot* s = find_local(ident)) {
+            n.kind = NameKind::Local;
+            n.pexName = s->mangled ? s->pexName : m_c.intern(ident);
+            n.type = s->type;
+            return n;
+        }
+        if (!m_f.isGlobal) {
             if (const VarInfo* v = m_self.own_variable(ident)) {
                 n.kind = NameKind::Variable;
-                n.pexName = m_c.intern(v->name);
+                n.pexName = m_c.intern(ident);
                 n.type = v->type;
                 return n;
             }
-        }
-        if (p) {
-            n.prop = p;
-            n.owner = owner;
-            n.type = p->type;
-            // An auto property, own or inherited, is the backing variable
-            // (vanilla RPDefault_LLInjection_Ammo reads the parent's
-            // ::InjectAtLevel_var directly).
-            if (p->isAuto) {
-                n.kind = NameKind::AutoProp;
-                n.pexName = m_c.intern("::" + p->name + "_var");
-            } else {
-                n.kind = NameKind::Property;
-            }
-            return n;
         }
         if (m_prog.find(ident)) {
             n.kind = NameKind::Type;
@@ -326,9 +372,15 @@ private:
         return o;
     }
 
-    Operand self_operand() {
+    // Identifiers are written in the spelling the source uses at that
+    // point, not the declared one (Probe04_Spelling: `hELPER.dOtHING(2)` ->
+    // `CALLMETHOD dOtHING`, `PROPGET AUTOVAL`, `IADD ::temp2 LOC 1`); the
+    // assembler then merges case variants to the first spelling in the
+    // listing (vanilla CommentaryObjectScript: `enable()` before
+    // `PlayAnimation("enable")` stores "enable", not the declared Enable).
+    Operand self_operand(std::string_view spelling = "self") {
         Operand o;
-        o.v = id("self");
+        o.v = id(spelling);
         o.type = TypeRef{m_self.name, false};
         return o;
     }
@@ -336,7 +388,7 @@ private:
     Operand expr(const Expr& e) {
         switch (e.kind) {
         case ExprKind::Lit: return literal(e.lit);
-        case ExprKind::Self: return self_operand();
+        case ExprKind::Self: return self_operand(e.text);
         case ExprKind::Parent: error(e.line, "'Parent' can only be used to call a function");
         case ExprKind::Ident: return ident_value(e);
         case ExprKind::Unary: return unary(e);
@@ -357,9 +409,13 @@ private:
             Operand arr = expr(*e.a);
             if (!arr.type.isArray) error(e.line, "indexing a value that is not an array");
             Operand idx = convert(expr(*e.b), type("Int"), e.line);
+            // The result temp is taken before the array and index temps are
+            // released (vanilla
+            // DLC1_NPCMentalModelScript.OnUpdate: `a[count] = a[count + 1]`
+            // on an int array takes a fresh temp for the element).
+            Operand t = alloc(TypeRef{arr.type.name, false});
             release(arr);
             release(idx);
-            Operand t = alloc(TypeRef{arr.type.name, false});
             emit(Opcode::ArrayGetElement, {t.v, arr.v, idx.v});
             return t;
         }
@@ -389,7 +445,7 @@ private:
         case NameKind::Property: {
             if (!n.prop->readable) error(e.line, "property " + n.prop->name + " cannot be read");
             Operand t = alloc(n.type);
-            emit(Opcode::PropGet, {id(n.prop->name), id("self"), t.v});
+            emit(Opcode::PropGet, {id(e.text), id("self"), t.v});
             return t;
         }
         case NameKind::Type: error(e.line, "type " + e.text + " used as a value");
@@ -415,7 +471,7 @@ private:
         if (!p->readable) error(e.line, "property " + e.text + " cannot be read");
         release(obj);
         Operand t = alloc(p->type);
-        emit(Opcode::PropGet, {id(p->name), obj.v, t.v});
+        emit(Opcode::PropGet, {id(e.text), obj.v, t.v});
         return t;
     }
 
@@ -722,13 +778,13 @@ private:
         std::vector<Value> ops;
         switch (c.kind) {
         case Callee::Method:
-            ops = {id(fn.name), c.obj.v, dest.v};
+            ops = {id(e.text), c.obj.v, dest.v};
             break;
         case Callee::Parent:
-            ops = {id(fn.name), dest.v};
+            ops = {id(e.text), dest.v};
             break;
         case Callee::Static:
-            ops = {id(lower(c.className)), id(fn.name), dest.v};
+            ops = {id(lower(c.className)), id(e.text), dest.v};
             break;
         default: break;
         }
@@ -786,7 +842,7 @@ private:
         m_line = st.line;
         switch (st.kind) {
         case StmtKind::Decl: {
-            declare_local(st.declType, st.declName, st.line);
+            declare_local(st);
             if (st.init) {
                 const Slot* s = find_local(st.declName);
                 Operand v = convert(expr(*st.init), s->type, st.line);
@@ -895,7 +951,7 @@ private:
                 Operand slot = alloc(n.type);
                 Operand v = convert(expr(*rhs), n.type, st.line);
                 emit(Opcode::Assign, {slot.v, v.v});
-                emit(Opcode::PropSet, {id(n.prop->name), id("self"), slot.v});
+                emit(Opcode::PropSet, {id(target.text), id("self"), slot.v});
                 release(slot);
                 release(v);
                 return;
@@ -927,7 +983,7 @@ private:
             Operand v = convert(expr(*rhs), p->type, st.line);
             emit(Opcode::Assign, {slot.v, v.v});
             paste(objCode);
-            emit(Opcode::PropSet, {id(p->name), obj.v, slot.v});
+            emit(Opcode::PropSet, {id(target.text), obj.v, slot.v});
             // The slot is released before the value's temp (vanilla
             // BFBPuzzle01Pillar: two such statements in a row keep slot t9,
             // value t10).
@@ -968,7 +1024,7 @@ private:
             if (n.kind == NameKind::Type) error(line, "type " + e.text + " used as an object");
             return o;
         }
-        if (e.kind == ExprKind::Self) return self_operand();
+        if (e.kind == ExprKind::Self) return self_operand(e.text);
         // Evaluate and discard: only the type is needed here, the receiver is
         // evaluated again at its real position (unsettled: a receiver with
         // side effects would run twice).
@@ -1012,8 +1068,7 @@ private:
     const ScriptInfo& m_self;
     int m_line = 0;
     std::vector<std::map<std::string, Slot>> m_scopes;
-    std::map<std::string, int> m_localNames;
-    int m_mangled = 0;
+    std::unordered_map<const Stmt*, std::string> m_mangledNames;  // Decl -> ::mangled_<name>_N
     std::map<std::string, std::deque<StrIdx>> m_free;
     bool m_haveNoneVar = false;
     std::vector<size_t> m_labels;

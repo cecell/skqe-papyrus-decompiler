@@ -199,6 +199,9 @@ private:
         // declared after a function has higher temp numbers). Items without
         // temps follow the previous item.
         const SourceLayout layout = source_layout(m_s, o);
+        // State blocks in the order whose Hashtable order is the recorded one
+        // (layout.hpp), so a recompile lists them as the original did.
+        const std::vector<size_t> stateOrder = source_state_order(m_s, o, layout);
         struct Section {
             int kind;  // 0 property, 1 default-state function, 2 state block
             size_t index;  // property index / function index / state index
@@ -232,7 +235,7 @@ private:
             sections.push_back({0, pi, key});
         }
         size_t defaultState = o.states.size();
-        for (size_t si : layout.states) {
+        for (size_t si : stateOrder) {
             if (str(o.states[si].name).empty()) {
                 defaultState = si;
                 break;
@@ -246,7 +249,7 @@ private:
                 sections.push_back({1, fi, temp_key(f.body)});
             }
         }
-        for (size_t si : layout.states) {
+        for (size_t si : stateOrder) {
             if (si == defaultState) continue;
             long long key = -1;
             for (size_t fi : layout.functions[si]) {

@@ -519,14 +519,9 @@ private:
             const Token op = cur();
             next();
             ExprPtr a = unary_expr();
-            // A negated number is a negative literal (the compiler folds it).
-            if (op.text == "-" && a->kind == ExprKind::Lit && (a->lit.kind == LitKind::Int || a->lit.kind == LitKind::Float)) {
-                if (a->lit.kind == LitKind::Int) a->lit.i = -a->lit.i;
-                else a->lit.f = -a->lit.f;
-                a->line = op.line;
-                a->column = op.column;
-                return a;
-            }
+            // Not folded: `- 5` and `-(5)` negate at run time (INEGATE); a
+            // negative literal is one token when the sign touches the digits
+            // (lexer.cpp).
             ExprPtr e = make(ExprKind::Unary, op);
             e->text = op.text;
             e->a = std::move(a);
@@ -663,7 +658,9 @@ private:
         }
         if (ieq(t.text, "self")) {
             next();
-            return make(ExprKind::Self, t);
+            ExprPtr e = make(ExprKind::Self, t);
+            e->text = t.text;  // written as spelled (Probe04: `sELF.dISABLE()` -> `CALLMETHOD dISABLE sELF`)
+            return e;
         }
         if (ieq(t.text, "parent")) {
             next();
@@ -705,7 +702,8 @@ bool parse(std::string_view text, const std::string& file, ScriptPtr& out, Diagn
     std::vector<Token> toks;
     LexError le;
     error.file = file;
-    if (!lex(text, toks, le)) {
+    const std::string decoded = decode_source(text);
+    if (!lex(decoded, toks, le)) {
         error.line = le.line;
         error.column = le.column;
         error.message = le.message;

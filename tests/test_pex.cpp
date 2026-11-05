@@ -1019,6 +1019,119 @@ bool compile_sample(MapResolver& r, const std::string& name, Script& out) {
 }
 }  // namespace
 
+// The compiler's spelling and allocation rules that the vanilla oracle
+// cannot see (docs/COMPILER_PATTERNS.md; probes/Probe04_Spelling.psc):
+// identifiers are written as spelled at the use, the assembler merges case
+// variants to the first spelling in the listing, and an array element read
+// takes its result temp before releasing the array and index temps.
+static void test_compile_rules() {
+    MapResolver r;
+    r.sources["scriptobject"] = R"(Scriptname ScriptObject
+Function GotoState(string asNewState) native
+string Function GetState() native
+)";
+    r.sources["form"] = R"(Scriptname Form extends ScriptObject
+)";
+    r.sources["objectreference"] = R"(Scriptname ObjectReference extends Form
+Function Disable(bool abFadeOut = false) native
+Function PlayAnimation(string asAnimation) native
+Event OnLoad()
+EndEvent
+)";
+    r.sources["utility"] = R"(Scriptname Utility
+Function Wait(float afSeconds) native global
+)";
+    r.sources["helper"] = R"(Scriptname Helper extends ObjectReference
+Int Property Val Auto
+Int Property Full
+    Int Function Get()
+        Return 1
+    EndFunction
+    Function Set(Int aValue)
+    EndFunction
+EndProperty
+Function DoThing(Int aCount = 1)
+EndFunction
+)";
+    r.sources["spelling"] = R"(Scriptname Spelling extends ObjectReference
+Helper Property H Auto
+Int myVar
+Int[] arr
+
+Event oNlOAD()
+    h.dOtHING(2)
+    uTILITY.wAIT(0.1)
+    sELF.dISABLE()
+    h.vAL = 1
+    Int total = h.VAL + h.fULL
+    MYVAR = total
+    PlayAnimation("disable")
+    Int i = 0
+    arr[i] = arr[i + 1]
+EndEvent
+
+Int Property Door Auto
+
+Function Res(Int Door)
+    Door = 3
+EndFunction
+
+Int Function Glob(Int Door) Global
+    Return Door
+EndFunction
+
+Function Rules(Int aParam)
+    If aParam
+        Int Twice = 1
+    EndIf
+    Int twice = 2
+    Int neg = - 5
+    Float f = -90 as Float
+EndFunction
+)";
+    // A source without a byte order mark is Windows-1252: 0x92 is U+2019.
+    r.sources["enc"] = "Scriptname Enc\n{It\x92s}\n";
+    Script s;
+    CHECK(compile_sample(r, "spelling", s));
+    const std::string a = to_asm(s);
+    // Name resolution: the auto property wins over the parameter in a
+    // method; a global function sees only its parameters.
+    CHECK(a.find("ASSIGN ::Door_var 3") != std::string::npos);
+    CHECK(a.find("RETURN Door") != std::string::npos);
+    // Mangling: the inner block's `twice` is renamed even though it is
+    // declared first; the enclosing scope's keeps the name.
+    CHECK(a.find(".local ::mangled_twice_0 int") != std::string::npos);  // "int": the autovar type came first
+    CHECK(a.find("::mangled_Twice") == std::string::npos);  // the lowercased key, whatever the source wrote
+    CHECK(a.find("ASSIGN ::mangled_twice_0 1") != std::string::npos);
+    CHECK(a.find("ASSIGN twice 2") != std::string::npos);
+    // `- 5` negates at run time; `-90` touching the digits is one literal.
+    CHECK(a.find("INEGATE") != std::string::npos);
+    CHECK(a.find(" -90") != std::string::npos);
+    {
+        Script e;
+        CHECK(compile_sample(r, "enc", e));
+        CHECK(!e.objects.empty() && std::string(e.str(e.objects[0].docString)) == "It\xE2\x80\x99s");
+    }
+    CHECK(a.find("CALLMETHOD dOtHING ::H_var") != std::string::npos);
+    CHECK(a.find("CALLSTATIC utility wAIT") != std::string::npos);
+    // Merged by the assembler rule to the spelling met first in the listing:
+    // the generated functions' `self`, the PROPSET's `vAL`, the variable table's `myVar`.
+    CHECK(a.find("CALLMETHOD dISABLE self") != std::string::npos);
+    CHECK(a.find("sELF") == std::string::npos);
+    CHECK(a.find("PROPSET vAL ::H_var") != std::string::npos);
+    CHECK(a.find("PROPGET vAL ::H_var") != std::string::npos);
+    CHECK(a.find("PROPGET fULL ::H_var") != std::string::npos);
+    CHECK(a.find("ASSIGN myVar total") != std::string::npos);
+    // The literal "disable" merged into the identifier spelled first.
+    CHECK(a.find("PlayAnimation self ::NoneVar \"dISABLE\"") != std::string::npos);
+    // Free int temps [::temp1, ::temp0]: the slot takes ::temp1, the index
+    // ::temp0, and the element a fresh ::temp2 because the index is still held.
+    CHECK(a.find("IADD ::temp0 i 1") != std::string::npos);
+    CHECK(a.find("ARRAYGETELEMENT ::temp2 arr ::temp0") != std::string::npos);
+    CHECK(a.find("ASSIGN ::temp1 ::temp2") != std::string::npos);
+    CHECK(a.find("ARRAYSETELEMENT arr i ::temp1") != std::string::npos);
+}
+
 static void test_audit() {
     MapResolver r;
     r.sources["scriptobject"] = R"(Scriptname ScriptObject
@@ -1258,6 +1371,7 @@ int main(int argc, char** argv) {
     test_assemble();
     test_elseif_rule();
     test_dotnet_hashtable_order();
+    test_compile_rules();
     test_audit();
     if (g_failures) {
         std::fprintf(stderr, "%d failure(s)\n", g_failures);

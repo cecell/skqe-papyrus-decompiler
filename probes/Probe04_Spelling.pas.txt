@@ -1,0 +1,185 @@
+.info
+  .source "Probe04_Spelling.psc"
+  .modifyTime 1793914224
+  .compileTime 1793914225
+  .user "user"
+  .computer "machine"
+.endInfo
+.userFlagsRef
+  .flag conditional 1
+  .flag hidden 0
+.endUserFlagsRef
+.objectTable
+  .object Probe04_Spelling ObjectReference
+    .userFlags 0
+    .docString "Probe: which spelling of each identifier the compiler writes when the source spells it differently from the declaration; the listing (Probe04_Spelling.pas.txt) is the answer."
+    .autoState 
+    .variableTable
+      .variable myVar Int
+        .userFlags 0
+        .initialValue None
+      .endVariable
+      .variable ::Helper_var probe04_helper
+        .userFlags 0
+        .initialValue None
+      .endVariable
+    .endVariableTable
+    .propertyTable
+	  .property Helper Probe04_Helper auto
+	    .userFlags 0
+	    .docString ""
+	    .autoVar ::Helper_var
+	  .endProperty
+	  .property OwnFull Int
+	    .userFlags 0
+	    .docString ""
+	    .function Get 
+	      .userFlags 0
+	      .docString ""
+	      .return Int
+	      .paramTable
+	      .endParamTable
+	      .localTable
+	      .endLocalTable
+	      .code
+	        RETURN myVar ;@line 8
+	      .endCode
+	    .endFunction
+	    .function Set 
+	      .userFlags 0
+	      .docString ""
+	      .return NONE
+	      .paramTable
+	        .param aValue Int
+	      .endParamTable
+	      .localTable
+	      .endLocalTable
+	      .code
+	        ASSIGN myVar aValue ;@line 11
+	      .endCode
+	    .endFunction
+	  .endProperty
+    .endPropertyTable
+    .stateTable
+      .state
+        .function GetState
+          .userFlags 0
+          .docString "Function that returns the current state"
+          .return String
+          .paramTable
+          .endParamTable
+          .localTable
+          .endLocalTable
+          .code
+            RETURN ::state
+          .endCode
+        .endFunction
+        .function GotoState
+          .userFlags 0
+          .docString "Function that switches this object to the specified state"
+          .return None
+          .paramTable
+            .param newState String
+          .endParamTable
+          .localTable
+            .local ::NoneVar None
+          .endLocalTable
+          .code
+            CALLMETHOD onEndState self ::NoneVar
+            ASSIGN ::state newState
+            CALLMETHOD onBeginState self ::NoneVar
+          .endCode
+        .endFunction
+        .function OwnFunc 
+          .userFlags 0
+          .docString ""
+          .return NONE
+          .paramTable
+            .param aParam Int
+            .param aRef ObjectReference
+          .endParamTable
+          .localTable
+          .endLocalTable
+          .code
+            ASSIGN MYVAR APARAM ;@line 16
+          .endCode
+        .endFunction
+        .function oNlOAD 
+          .userFlags 0
+          .docString ""
+          .return NONE
+          .paramTable
+          .endParamTable
+          .localTable
+            .local ::nonevar none
+            .local ::temp0 int
+            .local ::temp1 actor
+            .local ::temp2 int
+            .local ::temp3 objectreference
+            .local ::temp4 int[]
+            .local ::temp5 string
+            .local g Int
+            .local p Actor
+            .local total Int
+            .local loc Int
+            .local r ObjectReference
+            .local arr Int[]
+            .local b Bool
+          .endLocalTable
+          .code
+            CALLMETHOD dOtHING ::Helper_var ::nonevar 2 ;@line 21
+            CALLSTATIC probe04_helper gLOBALtHING ::temp0 3 ;@line 22
+            ASSIGN g ::temp0 ;@line 22
+            CALLMETHOD oWNfUNC self ::nonevar g None ;@line 23
+            CALLSTATIC utility wAIT ::nonevar 0.1 ;@line 24
+            CALLSTATIC game gETpLAYER ::temp1  ;@line 25
+            ASSIGN p ::temp1 ;@line 25
+            CALLPARENT oNlOAD ::nonevar  ;@line 26
+            CALLMETHOD dISABLE sELF ::nonevar false ;@line 27
+            ASSIGN ::temp0 1 ;@line 29
+            PROPSET aUTOvAL ::Helper_var ::temp0 ;@line 29
+            ASSIGN ::temp0 2 ;@line 30
+            PROPSET fULLvAL ::Helper_var ::temp0 ;@line 30
+            PROPGET AUTOVAL ::Helper_var ::temp0 ;@line 31
+            PROPGET FULLVAL ::Helper_var ::temp2 ;@line 31
+            IADD ::temp0 ::temp0 ::temp2 ;@line 31
+            ASSIGN total ::temp0 ;@line 31
+            ASSIGN ::temp2 total ;@line 32
+            PROPSET oWNfULL self ::temp2 ;@line 32
+            PROPGET OWNFULL self ::temp0 ;@line 33
+            ASSIGN total ::temp0 ;@line 33
+            ASSIGN loc 1 ;@line 35
+            IADD ::temp2 LOC 1 ;@line 36
+            ASSIGN loc ::temp2 ;@line 36
+            CAST ::temp3 p ;@line 37
+            ASSIGN r ::temp3 ;@line 37
+            ARRAYCREATE ::temp4 3 ;@line 38
+            ASSIGN arr ::temp4 ;@line 38
+            ASSIGN b tRUE ;@line 39
+            CAST ::temp3 nONE ;@line 40
+            ASSIGN r ::temp3 ;@line 40
+            STRCAT ::temp5 "wait" "disable" ;@line 42
+            STRCAT ::temp5 ::temp5 "ownfunc" ;@line 42
+            STRCAT ::temp5 ::temp5 "autoval" ;@line 42
+            STRCAT ::temp5 ::temp5 "loc" ;@line 42
+            CALLSTATIC debug Trace ::nonevar ::temp5 0 ;@line 42
+            CALLMETHOD GoToState self ::nonevar "dONE" ;@line 43
+          .endCode
+        .endFunction
+      .endState
+      .state done
+        .function oNlOAD 
+          .userFlags 0
+          .docString ""
+          .return NONE
+          .paramTable
+          .endParamTable
+          .localTable
+          .endLocalTable
+          .code
+          .endCode
+        .endFunction
+      .endState
+    .endStateTable
+  .endObject
+.endObjectTable
