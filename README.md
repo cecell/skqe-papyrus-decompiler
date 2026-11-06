@@ -125,7 +125,10 @@ pex compile <psc|dir> --flags <flg> [--import <dirs>] [--resolve <Data>] [--out 
 pex decompile <input> [--out <path>] [--resolve <Data>]
                                  Papyrus source; --resolve lets it consult the
                                  other scripts (parent chains, declarations)
-pex refs <input> [--csv]         FormID literals and their plugin names
+pex refs <input> [--csv] [--plugin <Name.esp>]
+                                 FormID literals and their plugin names; --plugin
+                                 keeps the call sites naming that plugin and
+                                 prints a count to stderr
 pex deps <input> [--resolve <Data>] [--vanilla <Misc.bsa>]
 pex diff <old> <new> [--resolve <Data>] [--json] [--quiet]
                                  what changed between two versions of a script
@@ -137,6 +140,14 @@ pex audit <input> [--resolve <Data>] [--json|--csv] [--rules]
                                  a summary by rule; docs/AUDIT.md
 pex closure <script.pex> --data <Data> [--import <dirs>] [--emit <dir>]
 pex patch <input> --map <FormIDMap> [--dry-run] [--backup]
+                                 renumbers FormID literals; loose files are
+                                 rewritten, scripts inside a .bsa overwritten in
+                                 place (4 bytes per literal, journaled, read back
+                                 through the archive's hash lookup); a rename, a
+                                 compressed member or a shared data block is
+                                 refused; docs/INTEGRATION.md
+pex patch --undo <journal> [--dry-run]
+                                 restores every byte a journal's patches changed
 pex check --rewrite <input>      read + write, compare byte for byte
 pex check --asm <input> --tools "<game>\Papyrus Compiler"
 pex check --assemble <input> [--tools "<game>\Papyrus Compiler"]

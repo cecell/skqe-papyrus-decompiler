@@ -3,6 +3,7 @@
 // Exit codes: 0 ok, 1 an input failed or a check found problems, 2 bad
 // arguments.
 // SPDX-License-Identifier: GPL-3.0-only
+#include "archive_patch.hpp"
 #include "inputs.hpp"
 #include "papyrus/analysis.hpp"
 #include "papyrus/assemble.hpp"
@@ -69,13 +70,17 @@ commands
                                --optional-objects declares object parameters
                                "= None" (for import sets that must compile
                                against each other, see docs/ROUNDTRIP.md)
-  refs <input> [--csv] [--callee Name,...]
+  refs <input> [--csv] [--callee Name,...] [--plugin Name.esp]
                                every integer that reaches a FormID-taking
                                call (GetFormFromFile, GetForm, GetFormEx, any
                                call passing an int then a "x.esp" string, plus
                                --callee names), with its plugin string and
                                whether it is a literal, propagated from an
-                               assignment, a property default, or dynamic
+                               assignment, a property default, or dynamic.
+                               --plugin keeps the call sites whose plugin string
+                               equals the name (any case; computed strings never
+                               match) and prints the count to stderr: call sites,
+                               scripts, loose and in archives
   deps <input> [--resolve <dir|bsa>] [--vanilla <dir|bsa>] [--json]
                                parent chain, types, calls per type, mod
                                events; with --vanilla, the calls vanilla does
@@ -127,7 +132,19 @@ commands
                                renumbers FormID literals paired with the
                                map's plugin (EslMapLib format), renames the
                                plugin string when the map says so, writes
-                               the file and reads it back; loose files only
+                               the file and reads it back. A script inside a
+                               .bsa is overwritten in place when only FormIDs
+                               change: 4 bytes per literal, journaled first in
+                               <archive>.pexpatch.journal, read back through
+                               the archive's hash lookup, rolled back if that
+                               fails. Refused, with the reason, for a rename,
+                               a compressed member or a data block shared with
+                               another member. --backup copies no archive
+                               (docs/INTEGRATION.md)
+  patch --undo <journal> [--dry-run]
+                               restores every byte the journal's patches
+                               changed; refuses if the archive holds anything
+                               the journal does not account for
   check --rewrite <input>      read + write every script, compare byte for byte
   check --asm <input> --tools <dir>
                                assemble our listing with PapyrusAssembler.exe
@@ -213,6 +230,8 @@ struct Options {
     std::string data;
     std::string emit;
     std::string map;
+    std::string undo;
+    std::string plugin;
     std::string callees;
     bool csv = false;
     bool rules = false;
@@ -257,6 +276,8 @@ bool parse(int argc, char** argv, int from, Options& o, const char* cmd) {
         else if (a == "--rules") o.rules = true;
         else if (a == "--dry-run") o.dryRun = true;
         else if (a == "--backup") o.backup = true;
+        else if (a == "--undo" && hasNext) o.undo = argv[++i];
+        else if (a == "--plugin" && hasNext) o.plugin = argv[++i];
         else if (a == "--comments") o.comments = true;
         else if (a == "--keep-generated") o.keepGenerated = true;
         else if (a == "--optional-objects") o.optionalObjects = true;
@@ -1362,6 +1383,13 @@ int cmd_refs(int argc, char** argv) {
     std::vector<std::string> rows(items.size());
     std::atomic<int> failures{0};
     std::mutex mu;
+    auto lowered = [](std::string_view v) {
+        std::string out(v);
+        std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+        return out;
+    };
+    const std::string wanted = lowered(o.plugin);
+    std::vector<size_t> sites(items.size(), 0);
     pextool::for_each_parallel(items, o.threads, [&](size_t i, const pextool::Item& it, pextool::Loader& ld) {
         pex::Script s;
         if (!load_script(it, ld, s, mu)) {
@@ -1370,6 +1398,10 @@ int cmd_refs(int argc, char** argv) {
         }
         std::string text;
         for (const pex::FormRef& r : pex::find_form_refs(s, extra)) {
+            if (!o.plugin.empty()) {
+                if (!r.pluginLiteral || lowered(r.plugin) != wanted) continue;
+                ++sites[i];
+            }
             char hex[16];
             std::snprintf(hex, sizeof hex, "%08X", unsigned(r.formId));
             if (o.csv) {
@@ -1390,6 +1422,23 @@ int cmd_refs(int argc, char** argv) {
     });
     if (o.csv) std::fputs("file,object,state,function,ip,callee,kind,formIdHex,plugin,pluginKind,variable\n", stdout);
     for (const std::string& r : rows) std::fputs(r.c_str(), stdout);
+    if (!o.plugin.empty()) {
+        size_t total = 0, scripts = 0, loose = 0, inArchives = 0;
+        std::set<fs::path> archives;
+        for (size_t i = 0; i < items.size(); ++i) {
+            if (sites[i] == 0) continue;
+            total += sites[i];
+            ++scripts;
+            if (items[i].archive.empty()) {
+                ++loose;
+            } else {
+                ++inArchives;
+                archives.insert(items[i].archive);
+            }
+        }
+        std::fprintf(stderr, "%s: %zu call sites in %zu scripts: %zu loose, %zu in %zu archives\n", o.plugin.c_str(), total, scripts, loose,
+                     inArchives, archives.size());
+    }
     return failures ? 1 : 0;
 }
 
@@ -1817,6 +1866,16 @@ int cmd_closure(int argc, char** argv) {
 int cmd_patch(int argc, char** argv) {
     Options o;
     if (!parse(argc, argv, 2, o, "patch")) return 2;
+    if (!o.undo.empty()) {
+        if (!o.map.empty() || !o.inputs.empty()) {
+            std::fprintf(stderr, "patch --undo takes the journal alone\n");
+            return 2;
+        }
+        std::string report;
+        const int undoFailures = pextool::undo_journal(fs::u8path(o.undo), o.dryRun, report);
+        std::fputs(report.c_str(), stdout);
+        return undoFailures ? 1 : 0;
+    }
     if (o.map.empty()) {
         std::fprintf(stderr, "patch needs --map <FormIDMap file>\n");
         return 2;
@@ -1840,6 +1899,11 @@ int cmd_patch(int argc, char** argv) {
     std::atomic<int> failures{0};
     std::mutex mu;
     std::vector<std::string> rows(items.size());
+    struct PlannedMember {
+        size_t row;
+        pextool::MemberPatch patch;
+    };
+    std::map<fs::path, std::vector<PlannedMember>> planned;
     pextool::for_each_parallel(items, o.threads, [&](size_t i, const pextool::Item& it, pextool::Loader& ld) {
         std::string& out = rows[i];
         std::vector<uint8_t> bytes;
@@ -1877,8 +1941,16 @@ int cmd_patch(int argc, char** argv) {
             return;
         }
         if (!it.archive.empty()) {
-            out += "ERR|" + it.label + "|inside an archive: cannot write; extract it first\n";
-            ++failures;
+            // Planned here; written below, once the workers' readers are closed.
+            pextool::MemberPatch member;
+            std::string why;
+            if (!pextool::make_member_patch(it.label, it.entryPath, bytes, s, r, member, why)) {
+                out += "ERR|" + it.label + "|" + why + "\n";
+                ++failures;
+                return;
+            }
+            std::lock_guard<std::mutex> lk(mu);
+            planned[it.archive].push_back({i, std::move(member)});
             return;
         }
         if (o.dryRun) {
@@ -1909,6 +1981,23 @@ int cmd_patch(int argc, char** argv) {
         }
         out += "PATCHED|" + it.label + "|" + std::to_string(r.edits.size()) + " edits, " + std::to_string(r.renamedStrings.size()) + " renames\n";
     });
+    // One archive at a time, in name order: the journal is per archive, and
+    // the write handle excludes other writers.
+    pextool::ArchivePatchOptions apo;
+    apo.dryRun = o.dryRun;
+    apo.backup = o.backup;
+    apo.mapPath = o.map;
+    apo.extraCallees = extra;
+    for (auto& [archive, members] : planned) {
+        std::vector<pextool::MemberPatch*> ptrs;
+        std::sort(members.begin(), members.end(), [](const PlannedMember& a, const PlannedMember& b) { return a.row < b.row; });
+        for (PlannedMember& m : members) ptrs.push_back(&m.patch);
+        pextool::patch_archive_members(archive, ptrs, apo);
+        for (PlannedMember& m : members) {
+            rows[m.row] += m.patch.report;
+            if (m.patch.failed) ++failures;
+        }
+    }
     for (const std::string& r : rows) std::fputs(r.c_str(), stdout);
     return failures ? 1 : 0;
 }
