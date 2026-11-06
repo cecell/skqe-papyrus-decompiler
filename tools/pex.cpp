@@ -71,7 +71,12 @@ commands
                                --optional-objects declares object parameters
                                "= None" (for import sets that must compile
                                against each other, see docs/ROUNDTRIP.md)
-  refs <input> [--csv] [--callee Name,...] [--plugin Name.esp]
+  refs [<input>] [--csv] [--callee Name,...] [--plugin Name.esp] [--out <folder>]
+                               with no input (or with --out or --load-order),
+                               only the copy of each script the game would load,
+                               with a copyHash of its contents; --out leaves out
+                               that folder's own files, installed or not. With an
+                               input named by hand, every copy in it. Lists
                                every integer that reaches a FormID-taking
                                call (GetFormFromFile, GetForm, GetFormEx, any
                                call passing an int then a "x.esp" string, plus
@@ -158,7 +163,10 @@ commands
   patch --out <folder> --plugin Name.esp --formid OLD:NEW [--formid ...]
             [<Data>] [--load-order <plugins.txt>] [--all-plugins] [--ini-dir <dir>]
             [--map <FormIDMap> instead of --plugin and --formid]
-            [--log <file>] [--callee Name,...] [--dry-run]
+            [--update] [--log <file>] [--callee Name,...] [--dry-run]
+                               --update overwrites a copy in <folder> whose source
+                               is no longer the winner, or removes it if the new
+                               winner has nothing for the plugin to change.
                                docs/ESLIFY_PRIMER.md. The game is found through
                                the registry, Steam's install, else GOG's, and
                                plugins.txt in %LOCALAPPDATA%\Skyrim Special Edition,
@@ -278,6 +286,7 @@ struct Options {
     std::string loadOrder;
     std::vector<std::string> iniDirs;
     bool allPlugins = false;
+    bool update = false;
     std::string callees;
     bool csv = false;
     bool rules = false;
@@ -330,6 +339,7 @@ bool parse(int argc, char** argv, int from, Options& o, const char* cmd) {
         else if (a == "--load-order" && hasNext) o.loadOrder = argv[++i];
         else if (a == "--ini-dir" && hasNext) o.iniDirs.push_back(argv[++i]);
         else if (a == "--all-plugins") o.allPlugins = true;
+        else if (a == "--update") o.update = true;
         else if (a == "--comments") o.comments = true;
         else if (a == "--keep-generated") o.keepGenerated = true;
         else if (a == "--optional-objects") o.optionalObjects = true;
@@ -1426,11 +1436,29 @@ std::string csv_str(std::string_view s) {
     return out + "\"";
 }
 
+bool resolve_game_paths(Options& o);
+
 int cmd_refs(int argc, char** argv) {
     Options o;
     if (!parse(argc, argv, 2, o, "refs")) return 2;
     std::vector<pextool::Item> items;
-    if (!collect(o, items)) return 2;
+    // With no input, the game: only the copy of each script it would load. An
+    // input named by hand lists what is in it, every copy.
+    const bool winnersOnly = o.inputs.empty() || !o.out.empty() || !o.loadOrder.empty();
+    std::vector<std::string> knownHashes;
+    if (winnersOnly) {
+        if (!resolve_game_paths(o)) return 2;
+        std::vector<fs::path> iniDirs;
+        for (const std::string& d : o.iniDirs) iniDirs.push_back(fs::u8path(d));
+        std::vector<std::string> kinds;
+        std::string why;
+        if (!pextool::winning_items(fs::u8path(o.inputs[0]), fs::u8path(o.loadOrder), iniDirs, o.allPlugins, o.out.empty() ? fs::path() : fs::u8path(o.out), items, kinds, knownHashes, why)) {
+            std::fprintf(stderr, "%s\n", why.c_str());
+            return 1;
+        }
+    } else if (!collect(o, items)) {
+        return 2;
+    }
     const std::vector<std::string> extra = split_list(o.callees, ',');
     std::vector<std::string> rows(items.size());
     std::atomic<int> failures{0};
@@ -1444,10 +1472,12 @@ int cmd_refs(int argc, char** argv) {
     std::vector<size_t> sites(items.size(), 0);
     pextool::for_each_parallel(items, o.threads, [&](size_t i, const pextool::Item& it, pextool::Loader& ld) {
         pex::Script s;
-        if (!load_script(it, ld, s, mu)) {
+        std::vector<uint8_t> bytes;
+        if (!load_script(it, ld, s, mu, &bytes)) {
             ++failures;
             return;
         }
+        const std::string copyHash = !winnersOnly ? std::string() : !knownHashes[i].empty() ? knownHashes[i] : pextool::bytes_hash(bytes);
         std::string text;
         for (const pex::FormRef& r : pex::find_form_refs(s, extra)) {
             if (!o.plugin.empty()) {
@@ -1460,19 +1490,21 @@ int cmd_refs(int argc, char** argv) {
                 text += csv_str(it.label) + "," + csv_str(r.object) + "," + csv_str(r.state) + "," + csv_str(r.function) + "," +
                         std::to_string(r.ip) + "," + csv_str(r.callee) + "," + pex::to_string(r.kind) + "," +
                         (r.kind == pex::RefKind::Dynamic ? std::string() : std::string(hex)) + "," + csv_str(r.plugin) + "," +
-                        (r.pluginLiteral ? "literal" : (r.plugin.empty() ? "" : "variable")) + "," + csv_str(r.variable) + "\n";
+                        (r.pluginLiteral ? "literal" : (r.plugin.empty() ? "" : "variable")) + "," + csv_str(r.variable) + (winnersOnly ? "," + copyHash : std::string()) + "\n";
             } else {
                 text += "{\"file\":" + json_str(it.label) + ",\"object\":" + json_str(r.object) + ",\"state\":" + json_str(r.state) +
                         ",\"function\":" + json_str(r.function) + ",\"ip\":" + std::to_string(r.ip) + ",\"callee\":" + json_str(r.callee) +
                         ",\"kind\":\"" + pex::to_string(r.kind) + "\"" +
                         (r.kind == pex::RefKind::Dynamic ? std::string() : ",\"formId\":" + std::to_string(r.formId) + ",\"formIdHex\":\"" + hex + "\"") +
                         ",\"plugin\":" + json_str(r.plugin) + ",\"pluginLiteral\":" + (r.pluginLiteral ? "true" : "false") +
-                        (r.variable.empty() ? std::string() : ",\"variable\":" + json_str(r.variable)) + "}\n";
+                        (r.variable.empty() ? std::string() : ",\"variable\":" + json_str(r.variable)) +
+                        (winnersOnly ? ",\"copyHash\":\"" + copyHash + "\"" : std::string()) + "}\n";
             }
         }
         rows[i] = std::move(text);
     });
-    if (o.csv) std::fputs("file,object,state,function,ip,callee,kind,formIdHex,plugin,pluginKind,variable\n", stdout);
+    if (o.csv) std::fputs(winnersOnly ? "file,object,state,function,ip,callee,kind,formIdHex,plugin,pluginKind,variable,copyHash\n"
+                                      : "file,object,state,function,ip,callee,kind,formIdHex,plugin,pluginKind,variable\n", stdout);
     for (const std::string& r : rows) std::fputs(r.c_str(), stdout);
     if (!o.plugin.empty()) {
         size_t total = 0, scripts = 0, loose = 0, inArchives = 0;
@@ -2008,8 +2040,8 @@ int cmd_patch(int argc, char** argv) {
             std::fprintf(stderr, "--out: %s\n", outWhy.c_str());
             return 2;
         }
-    } else if (!o.loadOrder.empty() || !o.iniDirs.empty() || o.allPlugins) {
-        std::fprintf(stderr, "--load-order, --ini-dir and --all-plugins go with --out\n");
+    } else if (!o.loadOrder.empty() || !o.iniDirs.empty() || o.allPlugins || o.update) {
+        std::fprintf(stderr, "--load-order, --ini-dir, --all-plugins and --update go with --out\n");
         return 2;
     }
     std::vector<pextool::Item> items;
@@ -2096,6 +2128,7 @@ int cmd_patch(int argc, char** argv) {
         oo.pluginsTxt = fs::u8path(o.loadOrder);
         for (const std::string& d : o.iniDirs) oo.iniDirs.push_back(fs::u8path(d));
         oo.allPlugins = o.allPlugins;
+        oo.update = o.update;
         oo.extraCallees = extra;
         oo.dryRun = o.dryRun;
         oo.threads = o.threads;
@@ -2451,7 +2484,7 @@ int cmd_winners(int argc, char** argv) {
     std::vector<fs::path> iniDirs;
     for (const std::string& d : o.iniDirs) iniDirs.push_back(fs::u8path(d));
     std::string csv, why;
-    if (!pextool::list_winners(fs::u8path(o.inputs[0]), fs::u8path(o.loadOrder), iniDirs, o.allPlugins, csv, why)) {
+    if (!pextool::list_winners(fs::u8path(o.inputs[0]), fs::u8path(o.loadOrder), iniDirs, o.allPlugins, o.out.empty() ? fs::path() : fs::u8path(o.out), csv, why)) {
         std::fprintf(stderr, "%s\n", why.c_str());
         return 1;
     }

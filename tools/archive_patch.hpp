@@ -134,6 +134,9 @@ void extract_members(const std::filesystem::path& archive, std::vector<MemberPat
 // failures.
 int undo_journal(const std::filesystem::path& journal, bool dryRun, std::string& report);
 
+// Identifies a file's contents (FNV-1a 64, as hex).
+std::string bytes_hash(const std::vector<uint8_t>& bytes);
+
 // Writes a patched script to `target` under a temporary name, reads that back,
 // checks it, and only then moves it into place, replacing what was there. A
 // failure leaves `target` as it was. False with the reason.

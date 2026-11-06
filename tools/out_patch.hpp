@@ -113,6 +113,10 @@ struct OutOptions {
     std::vector<std::filesystem::path> iniDirs;
     bool allPlugins = false;  // see plan_archives
     std::vector<std::string> extraCallees;
+    // A copy in the output folder is rebuilt when the copy the game would load is
+    // no longer the one it was built from, and removed if the new winner has
+    // nothing for this plugin to change. Otherwise it stays the starting point.
+    bool update = false;
     bool dryRun = false;
     unsigned threads = 0;
     // What the log says produced the pairs: "formid", or "map|<path>".
@@ -126,6 +130,10 @@ struct OutputLog {
         size_t edits = 0, renames = 0, notInMap = 0, dynamic = 0;
         std::vector<std::string> pairs;
         std::string reason, detail;  // for a skipped script
+        bool replaced = false;       // it overwrote an earlier copy in the output folder
+    };
+    struct Removed {
+        std::string name, winner, outFile;
     };
     struct Lost {
         std::string name, source, kind, winner;  // winner empty: no copy of it loads
@@ -134,6 +142,8 @@ struct OutputLog {
     };
     bool dryRun = false;
     bool allPlugins = false;
+    bool update = false;
+    std::vector<Removed> removed;
     std::string started, data, outFolder, pluginsTxt, iniSource, plugin, newPlugin, source;
     size_t pairs = 0, archivesLoaded = 0, archivesNotLoaded = 0, scripts = 0;
     std::vector<Entry> patched, skipped;
@@ -156,9 +166,22 @@ std::string check_output_folder(const std::filesystem::path& data, const std::fi
 // Refuses to write while the game runs. Returns the number of failures.
 int patch_to_output(const OutOptions& options, const papyrus::pex::FormIdMap& map, std::string& report, std::string& logText);
 
+// The copy of each script the game would load, as items to read. An output
+// folder's copies are not contenders, and neither is an installed copy of one
+// (a loose file with the bytes of something written there): once the mod is
+// installed its own file would otherwise win, and nothing could ever look
+// unchanged. If the output copy was built from a mod's loose file, that file is
+// hidden under ours and cannot be seen: it stays the winner, named as recorded,
+// with its hash in `knownHashes` (empty for every other item). `outFolder` may be
+// empty. False with the reason.
+bool winning_items(const std::filesystem::path& data, const std::filesystem::path& pluginsTxt,
+                   const std::vector<std::filesystem::path>& iniDirs, bool allPlugins, const std::filesystem::path& outFolder,
+                   std::vector<Item>& items, std::vector<std::string>& kinds, std::vector<std::string>& knownHashes, std::string& why);
+
 // The `pex winners` listing: script, kind, source, one line each, header first.
 // False with the reason when the load order cannot be established.
 bool list_winners(const std::filesystem::path& data, const std::filesystem::path& pluginsTxt,
-                  const std::vector<std::filesystem::path>& iniDirs, bool allPlugins, std::string& csv, std::string& why);
+                  const std::vector<std::filesystem::path>& iniDirs, bool allPlugins, const std::filesystem::path& outFolder,
+                  std::string& csv, std::string& why);
 
 }  // namespace pextool

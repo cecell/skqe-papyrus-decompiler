@@ -189,6 +189,7 @@ struct CopyResult {
     std::string lines;  // EDIT, SKIP, RENAME
     std::vector<uint8_t> newBytes;
     std::string refusal, refusalCode;
+    std::string sourceHash;  // of the winning copy's own bytes
 };
 
 // Identifies a set of pairs: its entries are in key order, so equal sets match.
@@ -213,9 +214,17 @@ std::string pairs_hash(const pex::FormIdMap& map) {
 // outside the folder, so what earlier lines say about that script no longer holds.
 constexpr const char* kNewCopy = "*new-copy*";
 
-// (script, plugin) -> hash of the pairs already applied.
-std::map<std::pair<std::string, std::string>, std::string> read_output_state(const fs::path& file) {
-    std::map<std::pair<std::string, std::string>, std::string> out;
+constexpr const char* kSource = "*source*";  // the copy an output copy was built from
+constexpr const char* kWrote = "*wrote*";    // the bytes of a copy written there
+
+struct OutputState {
+    std::map<std::pair<std::string, std::string>, std::string> applied;  // (script, plugin) -> hash of the pairs
+    std::map<std::string, std::string> source;                           // script -> "<label>#<hash>"
+    std::map<std::string, std::set<std::string>> wrote;                  // script -> hashes of every copy written
+};
+
+OutputState read_output_state(const fs::path& file) {
+    OutputState out;
     const std::string text = read_text(file);
     size_t pos = 0;
     while (pos < text.size()) {
@@ -228,12 +237,58 @@ std::map<std::pair<std::string, std::string>, std::string> read_output_state(con
         if (b == std::string::npos) continue;
         const std::string script = line.substr(0, a), plugin = line.substr(a + 1, b - a - 1);
         if (plugin == kNewCopy) {
-            for (auto it = out.lower_bound({script, std::string()}); it != out.end() && it->first.first == script;) it = out.erase(it);
-            continue;
+            for (auto it = out.applied.lower_bound({script, std::string()}); it != out.applied.end() && it->first.first == script;) it = out.applied.erase(it);
+            out.source.erase(script);
+        } else if (plugin == kSource) {
+            out.source[script] = line.substr(b + 1);
+        } else if (plugin == kWrote) {
+            out.wrote[script].insert(line.substr(b + 1));
+        } else {
+            out.applied[{script, plugin}] = line.substr(b + 1);
         }
-        out[{script, plugin}] = line.substr(b + 1);
     }
     return out;
+}
+
+// Takes out a loose copy that is really this output folder's own file, installed.
+// There is only one loose file, so if the copy was built from another loose file,
+// a mod's, that one is now hidden under ours and cannot be seen. It is still the
+// source, or every install would look like a change back to some older archive.
+// Those are returned: script -> our installed file.
+std::map<std::string, fs::path> drop_our_installed_copies(std::map<std::string, std::vector<ScriptCopy>>& scripts, const OutputState& state, const fs::path& outFolder) {
+    std::map<std::string, fs::path> hiddenSources;
+    if (outFolder.empty()) return hiddenSources;
+    const fs::path ours = find_scripts_folder(outFolder);
+    for (auto& [key, copies] : scripts) {
+        for (size_t i = 0; i < copies.size(); ++i) {
+            if (copies[i].kind != CopyKind::Loose) continue;
+            const auto wrote = state.wrote.find(key);
+            std::error_code ec;
+            const fs::path mine = ours.empty() ? fs::path() : ours / fs::u8path(copies[i].item.name);
+            const bool outCopy = !mine.empty() && fs::is_regular_file(mine, ec);
+            if (wrote == state.wrote.end() && !outCopy) continue;
+            const std::string text = read_text(copies[i].item.file);
+            const std::string hash = bytes_hash(std::vector<uint8_t>(text.begin(), text.end()));
+            bool isOurs = wrote != state.wrote.end() && wrote->second.count(hash) != 0;
+            if (!isOurs && outCopy) isOurs = read_text(mine) == text;
+            if (!isOurs) continue;
+            const auto source = state.source.find(key);
+            if (source != state.source.end() && lower(source->second).find(".bsa:") == std::string::npos) hiddenSources[key] = copies[i].item.file;
+            copies.erase(copies.begin() + static_cast<std::ptrdiff_t>(i--));
+        }
+    }
+    return hiddenSources;
+}
+
+// The copy that would win if the output folder were not there.
+int winning_source_copy(const std::vector<ScriptCopy>& copies) {
+    int best = -1;
+    for (size_t i = 0; i < copies.size(); ++i) {
+        const ScriptCopy& c = copies[i];
+        if (c.kind == CopyKind::NotLoaded || c.kind == CopyKind::Output) continue;
+        if (best < 0 || c.kind > copies[best].kind || (c.kind == copies[best].kind && c.rank > copies[best].rank)) best = static_cast<int>(i);
+    }
+    return best;
 }
 
 void join_pairs(const std::vector<std::string>& pairs, std::string& out) {
@@ -244,9 +299,10 @@ void join_pairs(const std::vector<std::string>& pairs, std::string& out) {
 
 std::string render_output_log(const OutputLog& log) {
     const char* patchedWord = log.dryRun ? "would-patch" : "patched";
-    std::string out = "pex patch output log v1\n";
+    std::string out = "pex patch output log v2\n";
     out += "started|" + log.started + "\n";
     out += std::string("mode|") + (log.dryRun ? "dry-run" : "write") + "\n";
+    out += std::string("update|") + (log.update ? "yes" : "no") + "\n";
     out += "data|" + log.data + "\n";
     out += "output|" + log.outFolder + "\n";
     out += "load-order|" + log.pluginsTxt + "\n";
@@ -265,11 +321,12 @@ std::string render_output_log(const OutputLog& log) {
     for (const OutputLog::Entry& e : log.patched) {
         out += std::string(patchedWord) + "|" + e.name + "|" + std::to_string(e.edits) + "|" + std::to_string(e.renames) + "|";
         join_pairs(e.pairs, out);
-        out += "|" + std::to_string(e.notInMap) + "|" + std::to_string(e.dynamic) + "|" + e.kind + "|" + e.source + "|" + e.outFile + "\n";
+        out += "|" + std::to_string(e.notInMap) + "|" + std::to_string(e.dynamic) + "|" + e.kind + "|" + e.source + "|" + e.outFile + "|" + (e.replaced ? "replaced" : "new") + "\n";
         edits += e.edits;
         notInMap += e.notInMap;
         dynamic += e.dynamic;
     }
+    for (const OutputLog::Removed& r : log.removed) out += "removed|" + r.name + "|" + r.winner + "|" + r.outFile + "\n";
     out += "\n[skipped]\n";
     for (const OutputLog::Entry& e : log.skipped) {
         std::string detail = e.detail;
@@ -290,6 +347,7 @@ std::string render_output_log(const OutputLog& log) {
     out += "\n[totals]\n";
     out += "scripts|" + std::to_string(log.scripts) + "\n";
     out += std::string(patchedWord) + "|" + std::to_string(log.patched.size()) + "\n";
+    out += "removed|" + std::to_string(log.removed.size()) + "\n";
     out += "edits|" + std::to_string(edits) + "\n";
     out += "skipped|" + std::to_string(log.skipped.size()) + "\n";
     for (const auto& [reason, n] : reasons) out += "skipped." + reason + "|" + std::to_string(n) + "\n";
@@ -646,6 +704,9 @@ int patch_to_output(const OutOptions& options, const pex::FormIdMap& map, std::s
     }
     std::vector<std::string> warnings;
     std::map<std::string, std::vector<ScriptCopy>> scripts = collect_script_copies(options.data, options.outFolder, plan, warnings);
+    const fs::path stateFile = output_state_path(options.outFolder);
+    const OutputState state = read_output_state(stateFile);
+    const std::map<std::string, fs::path> hiddenSources = drop_our_installed_copies(scripts, state, options.outFolder);
     for (const std::string& w : warnings) report += "NOTE|" + w + "\n";
     report += std::string("ORDER|") + (options.allPlugins ? "every listed plugin, " : "active plugins, ") + std::to_string(plan.plugins) + " plugins, " + std::to_string(plan.loaded.size()) + " archives load, " +
               std::to_string(plan.notLoaded.size()) + " do not|archive lists from " + plan.iniSource + "\n";
@@ -659,14 +720,31 @@ int patch_to_output(const OutOptions& options, const pex::FormIdMap& map, std::s
     std::vector<Item> items;
     std::vector<Slot> slots;
     std::map<std::string, int> winners;
+    std::set<std::string> rebuilding;  // --update: the output copy's source is no longer the winner
+    Loader sourceLoader;
     for (const auto& [key, copies] : scripts) {
-        const int w = winning_copy(copies);
+        int w = winning_copy(copies);
+        if (options.update && w >= 0 && copies[static_cast<size_t>(w)].kind == CopyKind::Output && !hiddenSources.count(key)) {
+            const int t = winning_source_copy(copies);
+            if (t >= 0) {
+                const Item& it = copies[static_cast<size_t>(t)].item;
+                std::vector<uint8_t> bytes;
+                std::string e;
+                const std::string identity = it.label + "#" + (sourceLoader.load(it, bytes, e) ? bytes_hash(bytes) : std::string());
+                const auto known = state.source.find(key);
+                if (known == state.source.end() || known->second != identity) {
+                    w = t;
+                    rebuilding.insert(key);
+                }
+            }
+        }
         winners[key] = w;
         for (size_t i = 0; i < copies.size(); ++i) {
             items.push_back(copies[i].item);
             slots.push_back({&copies[i], static_cast<int>(i) == w, &key});
         }
     }
+    sourceLoader = Loader();  // no mapping is kept open past this point
     std::vector<CopyResult> results(items.size());
     for_each_parallel(items, options.threads, [&](size_t i, const Item& it, Loader& ld) {
         CopyResult& res = results[i];
@@ -678,6 +756,7 @@ int patch_to_output(const OutOptions& options, const pex::FormIdMap& map, std::s
             return;
         }
         res.read = true;
+        if (slots[i].winner) res.sourceHash = bytes_hash(bytes);
         const pex::PatchResult r = pex::apply_formid_map(s, map, options.extraCallees);
         res.edits = r.edits;
         res.renames = r.renamedStrings.size();
@@ -724,6 +803,7 @@ int patch_to_output(const OutOptions& options, const pex::FormIdMap& map, std::s
     OutputLog log;
     log.dryRun = options.dryRun;
     log.allPlugins = options.allPlugins;
+    log.update = options.update;
     log.started = utc_timestamp();
     log.data = options.data.u8string();
     log.outFolder = options.outFolder.u8string();
@@ -738,8 +818,7 @@ int patch_to_output(const OutOptions& options, const pex::FormIdMap& map, std::s
     log.scripts = scripts.size();
 
     int failures = 0;
-    const fs::path stateFile = output_state_path(options.outFolder);
-    const auto applied = read_output_state(stateFile);
+    const auto& applied = state.applied;
     const std::string thisHash = pairs_hash(map);
     const std::string pluginKey = lower(map.plugin);
     const fs::path scriptsFolder = [&] {
@@ -754,7 +833,8 @@ int patch_to_output(const OutOptions& options, const pex::FormIdMap& map, std::s
         const int w = winners[*slot.key];
         if (!slot.winner) {
             // A copy the game does not use, that would have changed: worth saying.
-            if (res.edits.empty() && res.renames == 0) continue;
+            // The output copy passed over by --update is about to be replaced.
+            if (slot.copy->kind == CopyKind::Output || (res.edits.empty() && res.renames == 0)) continue;
             OutputLog::Lost lost;
             lost.name = items[i].name;
             lost.source = items[i].label;
@@ -796,6 +876,33 @@ int patch_to_output(const OutOptions& options, const pex::FormIdMap& map, std::s
             ++failures;
             continue;
         }
+        const bool replacing = rebuilding.count(*slot.key) != 0;
+        if (res.edits.empty() && res.renames == 0 && replacing && applied.count({*slot.key, pluginKey})) {
+            // The new winner has nothing for this plugin, so the old copy would
+            // only override it with an out-of-date script.
+            const fs::path stale = scriptsFolder / fs::u8path(items[i].name);
+            const std::string counts = "the game now loads " + items[i].label + ", with nothing to change for " + map.plugin;
+            OutputLog::Removed removed;
+            removed.name = items[i].name;
+            removed.winner = items[i].label;
+            removed.outFile = stale.u8string();
+            if (options.dryRun) {
+                report += "DRYRUN|" + removed.outFile + "|would remove: " + counts + "\n";
+            } else {
+                std::error_code removeEc;
+                fs::remove(stale, removeEc);
+                if (removeEc) {
+                    report += "ERR|" + removed.outFile + "|cannot remove it: " + removeEc.message() + "\n";
+                    ++failures;
+                    continue;
+                }
+                std::ofstream gone(stateFile, std::ios::binary | std::ios::app);
+                gone << *slot.key << "|" << kNewCopy << "|\n";
+                report += "REMOVED|" + removed.outFile + "|" + counts + "\n";
+            }
+            log.removed.push_back(std::move(removed));
+            continue;
+        }
         if (res.edits.empty() && res.renames == 0) {
             report += "UNCHANGED|" + items[i].label + "\n";
             if (res.notInMap || res.dynamic) {
@@ -829,7 +936,9 @@ int patch_to_output(const OutOptions& options, const pex::FormIdMap& map, std::s
         }
         const fs::path target = scriptsFolder / fs::u8path(items[i].name);
         entry.outFile = target.u8string();
-        const std::string counts = std::to_string(res.edits.size()) + " edits, " + std::to_string(res.renames) + " renames, from " + items[i].label;
+        entry.replaced = replacing || slot.copy->kind == CopyKind::Output;
+        const std::string counts = std::to_string(res.edits.size()) + " edits, " + std::to_string(res.renames) + " renames, from " + items[i].label +
+                                   (replacing ? ", replacing the copy built from an earlier winner" : "");
         if (options.dryRun) {
             report += "DRYRUN|" + entry.outFile + "|" + counts + "\n";
             log.patched.push_back(std::move(entry));
@@ -844,11 +953,15 @@ int patch_to_output(const OutOptions& options, const pex::FormIdMap& map, std::s
             ++failures;
             continue;
         }
-        std::ofstream state(stateFile, std::ios::binary | std::ios::app);
-        if (slot.copy->kind != CopyKind::Output) state << *slot.key << "|" << kNewCopy << "|\n";
-        state << *slot.key << "|" << pluginKey << "|" << thisHash << "\n";
-        state.close();
-        if (!state) {
+        std::ofstream record(stateFile, std::ios::binary | std::ios::app);
+        if (slot.copy->kind != CopyKind::Output) {
+            record << *slot.key << "|" << kNewCopy << "|\n";
+            record << *slot.key << "|" << kSource << "|" << items[i].label << "#" << res.sourceHash << "\n";
+        }
+        record << *slot.key << "|" << pluginKey << "|" << thisHash << "\n";
+        record << *slot.key << "|" << kWrote << "|" << bytes_hash(res.newBytes) << "\n";
+        record.close();
+        if (!record) {
             report += "ERR|" + stateFile.u8string() + "|written, but cannot record it; rerunning this map could renumber twice\n";
             ++failures;
         }
@@ -859,18 +972,47 @@ int patch_to_output(const OutOptions& options, const pex::FormIdMap& map, std::s
     return failures;
 }
 
-bool list_winners(const fs::path& data, const fs::path& pluginsTxt, const std::vector<fs::path>& iniDirs, bool allPlugins, std::string& csv, std::string& why) {
+bool winning_items(const fs::path& data, const fs::path& pluginsTxt, const std::vector<fs::path>& iniDirs, bool allPlugins, const fs::path& outFolder,
+                   std::vector<Item>& items, std::vector<std::string>& kinds, std::vector<std::string>& knownHashes, std::string& why) {
     ArchivePlan plan;
     if (!plan_archives(data, pluginsTxt, iniDirs, allPlugins, plan, why)) return false;
     std::vector<std::string> warnings;
-    const auto scripts = collect_script_copies(data, fs::path(), plan, warnings);
-    csv = "script,kind,source\n";
+    auto scripts = collect_script_copies(data, fs::path(), plan, warnings);
+    OutputState state;
+    if (!outFolder.empty()) state = read_output_state(output_state_path(outFolder));
+    const auto hiddenSources = drop_our_installed_copies(scripts, state, outFolder);
     for (const auto& [key, copies] : scripts) {
+        const auto hidden = hiddenSources.find(key);
+        if (hidden != hiddenSources.end()) {
+            // Its bytes cannot be read, being under ours: named as recorded.
+            const std::string& identity = state.source.at(key);
+            const size_t mark = identity.rfind('#');
+            Item item;
+            item.file = hidden->second;
+            item.name = hidden->second.filename().u8string();
+            item.label = identity.substr(0, mark);
+            items.push_back(std::move(item));
+            kinds.push_back(to_string(CopyKind::Loose));
+            knownHashes.push_back(mark == std::string::npos ? std::string() : identity.substr(mark + 1));
+            continue;
+        }
         const int w = winning_copy(copies);
         if (w < 0) continue;
         const ScriptCopy& c = copies[static_cast<size_t>(w)];
-        csv += key + "," + to_string(c.kind) + ",\"" + c.item.label + "\"\n";
+        items.push_back(c.item);
+        kinds.push_back(to_string(c.kind));
+        knownHashes.emplace_back();
     }
+    return true;
+}
+
+bool list_winners(const fs::path& data, const fs::path& pluginsTxt, const std::vector<fs::path>& iniDirs, bool allPlugins, const fs::path& outFolder,
+                  std::string& csv, std::string& why) {
+    std::vector<Item> items;
+    std::vector<std::string> kinds, knownHashes;
+    if (!winning_items(data, pluginsTxt, iniDirs, allPlugins, outFolder, items, kinds, knownHashes, why)) return false;
+    csv = "script,kind,source\n";
+    for (size_t i = 0; i < items.size(); ++i) csv += lower(items[i].name) + "," + kinds[i] + ",\"" + items[i].label + "\"\n";
     return true;
 }
 

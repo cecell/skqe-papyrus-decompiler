@@ -1201,6 +1201,8 @@ void extract_members(const fs::path& archive, std::vector<MemberPatch*> members,
     members.back()->report += "JOURNAL|" + archiveText + "|" + journal.u8string() + "|" + std::to_string(good) + " extracted\n";
 }
 
+std::string bytes_hash(const std::vector<uint8_t>& bytes) { return fnv1a64_hex(bytes); }
+
 bool write_verified_script(const fs::path& target, const std::vector<uint8_t>& bytes, const std::vector<pex::PatchEdit>& edits,
                            const std::vector<std::string>& extraCallees, std::string& why) {
     std::error_code ec;

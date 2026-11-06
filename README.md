@@ -125,10 +125,11 @@ pex compile <psc|dir> --flags <flg> [--import <dirs>] [--resolve <Data>] [--out 
 pex decompile <input> [--out <path>] [--resolve <Data>]
                                  Papyrus source; --resolve lets it consult the
                                  other scripts (parent chains, declarations)
-pex refs <input> [--csv] [--plugin <Name.esp>]
-                                 FormID literals and their plugin names; --plugin
-                                 keeps the call sites naming that plugin and
-                                 prints a count to stderr
+pex refs [<input>] [--csv] [--plugin <Name.esp>] [--out <folder>]
+                                 FormID literals and their plugin names; with no
+                                 input, only the copy of each script the game loads,
+                                 with a hash of it; --plugin keeps the call sites
+                                 naming that plugin and prints a count to stderr
 pex deps <input> [--resolve <Data>] [--vanilla <Misc.bsa>]
 pex diff <old> <new> [--resolve <Data>] [--json] [--quiet]
                                  what changed between two versions of a script
@@ -156,8 +157,9 @@ pex patch --undo <journal> [--dry-run]
                                  restores every byte a journal's patches changed
                                  and deletes what they extracted; a run writes one
                                  journal per archive and folder
-pex patch --out <folder> --plugin <Name.esp> --formid OLD:NEW
-                                 changes nothing in Data: each script's one winning
+pex patch --out <folder> --plugin <Name.esp> --formid OLD:NEW [--update]
+                                 changes nothing in Data; --update overwrites a
+                                 copy whose winner has changed: each script's one winning
                                  copy, patched, goes to <folder>\scripts\ to install
                                  as a mod. Finds the game (Steam, else GOG) through
                                  the registry and plugins.txt in %LOCALAPPDATA%, or

@@ -864,6 +864,11 @@ static Bytes tiny_plugin(uint32_t flags) {
     return b;
 }
 
+static std::string lower_name(std::string s) {
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
 static std::string script_text(const char* name, int id) {
     return std::string("Scriptname ") + name + "\nForm Function Fetch()\n    Return Game.GetFormFromFile(" + std::to_string(id) + ", \"Foo.esp\")\nEndFunction\n";
 }
@@ -984,7 +989,7 @@ static void test_out(const fs::path& base) {
         CHECK(allWinner("onlyunlisted.pex").empty());
         CHECK(allWinner("onlystray.pex").empty());
         std::string allList, allWhy;
-        CHECK(list_winners(data, plugins, {iniDir}, true, allList, allWhy));
+        CHECK(list_winners(data, plugins, {iniDir}, true, fs::path(), allList, allWhy));
         CHECK(contains(allList, "onlyoff.pex,archive,"));
         CHECK(!contains(allList, "onlyunlisted.pex"));
         OutOptions a;
@@ -1002,7 +1007,7 @@ static void test_out(const fs::path& base) {
     }
 
     std::string list, listWhy;
-    CHECK(list_winners(data, plugins, {iniDir}, false, list, listWhy));
+    CHECK(list_winners(data, plugins, {iniDir}, false, fs::path(), list, listWhy));
     CHECK(contains(list, "looser.pex,loose,"));
     CHECK(contains(list, "ordered.pex,archive,"));
     CHECK(!contains(list, "onlyoff.pex"));
@@ -1066,13 +1071,14 @@ static void test_out(const fs::path& base) {
     CHECK(output_state_path(output).parent_path() == fs::absolute(output).lexically_normal().parent_path());
 
     // The log says what won, and what lost and would have changed.
-    CHECK(text.rfind("pex patch output log v1\n", 0) == 0);
+    CHECK(text.rfind("pex patch output log v2\n", 0) == 0);
+    CHECK(contains(text, "\nupdate|no\n"));
     CHECK(contains(text, "\npatched|ordered.pex|1|0|00000805->00000A05|0|0|archive|Esp2 - Textures.bsa:"));
     CHECK(contains(text, "\npatched|Looser.pex|1|0|0000080B->00000A0B|0|0|loose|"));
     CHECK(contains(text, "\nlost|ordered.pex|1|00000804->00000A04|archive|Esp1.bsa:"));
     CHECK(contains(text, "\nlost|onlyoff.pex|1|0000080D->00000A0D|not-loaded|Off.bsa:scripts\\onlyoff.pex|\n"));
     CHECK(contains(text, "\n[totals]\nscripts|"));
-    CHECK(contains(text, "\npatched|5\nedits|5\n"));
+    CHECK(contains(text, "\npatched|5\nremoved|0\nedits|5\n"));
     CHECK(contains(report, "LOST|Off.bsa:scripts\\onlyoff.pex|1 edits|its archive does not load\n"));
 
     // The same run again: the output copies are what win, and they do not move.
@@ -1182,6 +1188,151 @@ static void test_out(const fs::path& base) {
     // No usable load order.
     CHECK(!plan_archives(data, root / "missing.txt", {iniDir}, false, blocked, why));
     CHECK(!plan_archives(root / "nowhere", plugins, {iniDir}, false, blocked, why));
+}
+
+// --- --update: rebuild only when the winner changed -----------------------------------
+
+static void test_update(const fs::path& base) {
+    const fs::path root = base / "update";
+    const fs::path data = root / "Data", iniDir = root / "ini", output = root / "output";
+    fs::create_directories(data / "Scripts");
+    fs::create_directories(iniDir);
+    spit(data / "Skyrim.esm", tiny_plugin(1));
+    spit(data / "Mod.esp", tiny_plugin(0));
+    spit(data / "Later.esp", tiny_plugin(0));
+    spit(data / "Last.esp", tiny_plugin(0));
+    const fs::path plugins = root / "plugins.txt";
+    {
+        std::ofstream f(plugins, std::ios::binary);
+        f << "*Mod.esp\n*Later.esp\n*Last.esp\n";
+    }
+    {
+        std::ofstream f(iniDir / "Skyrim.ini", std::ios::binary);
+        f << "[Archive]\nsResourceArchiveList=\nsResourceArchiveList2=\n";
+    }
+    auto source = [](const char* lines) { return std::string("Scriptname Upd\nFunction F()\n") + lines + "EndFunction\n"; };
+    const Bytes v1 = compile_script("Upd", source("    Game.GetFormFromFile(0x821, \"Foo.esp\")\n").c_str());
+    spit(data / "Mod.bsa", build_bsa(0x3, {{"scripts", "upd.pex", v1}}));
+
+    OutOptions o;
+    o.data = data;
+    o.outFolder = output;
+    o.pluginsTxt = plugins;
+    o.iniDirs = {iniDir};
+    o.source = "formid";
+    OutOptions u = o;
+    u.update = true;
+    const pex::FormIdMap foo = load_map("!PLUGIN=Foo.esp\n00000821|00000A21\n");
+    const pex::FormIdMap bar = load_map("!PLUGIN=Bar.esp\n00000822|00000A22\n");
+    const fs::path copy = output / "scripts" / "upd.pex";
+    std::string report, text;
+    auto patch = [&](const OutOptions& opt, const pex::FormIdMap& map) {
+        report.clear();
+        text.clear();
+        return patch_to_output(opt, map, report, text);
+    };
+    auto winner = [&](const fs::path& out) {
+        std::vector<Item> items;
+        std::vector<std::string> kinds, hashes;
+        std::string why;
+        CHECK(winning_items(data, plugins, {iniDir}, false, out, items, kinds, hashes, why));
+        for (const Item& it : items) {
+            if (lower_name(it.name) == "upd.pex") return it.label;
+        }
+        return std::string();
+    };
+
+    CHECK(patch(o, foo) == 0);
+    const Bytes first = slurp(copy);
+    CHECK(only_ref(first) == 0xA21);
+
+    // Once installed, the mod's own file would win. It is not a contender.
+    spit(data / "Scripts" / "upd.pex", first);
+    CHECK(contains(winner(fs::path()), "Scripts"));
+    CHECK(contains(winner(output), "Mod.bsa:"));
+
+    // The winner has not changed: --update changes nothing, however often.
+    CHECK(patch(u, foo) == 0);
+    CHECK(slurp(copy) == first);
+    CHECK(contains(report, "UNCHANGED|"));
+    CHECK(!contains(report, "replacing"));
+    CHECK(contains(text, "\nupdate|yes\n"));
+
+    // A new patch loads later with its own version. Without --update the copy
+    // stays; with it, it is rebuilt from the new winner.
+    const Bytes v2 = compile_script("Upd", source("    Game.GetFormFromFile(0x821, \"Foo.esp\")\n    Game.GetFormFromFile(0x822, \"Bar.esp\")\n").c_str());
+    spit(data / "Later.bsa", build_bsa(0x3, {{"scripts", "upd.pex", v2}}));
+    CHECK(contains(winner(output), "Later.bsa:"));
+    CHECK(patch(o, foo) == 0);
+    CHECK(slurp(copy) == first);
+    u.dryRun = true;
+    CHECK(patch(u, foo) == 0);
+    CHECK(contains(report, "DRYRUN|") && contains(report, "replacing"));
+    CHECK(slurp(copy) == first);
+    u.dryRun = false;
+    CHECK(patch(u, foo) == 0);
+    CHECK(contains(report, "PATCHED|") && contains(report, "replacing the copy built from an earlier winner"));
+    CHECK(contains(text, "|replaced\n"));
+    const Bytes second = slurp(copy);
+    CHECK(second != first);
+    CHECK(only_ref(second) == 0xA21);
+
+    // The second plugin builds on that copy instead of rebuilding it, and a
+    // further run of either changes nothing.
+    CHECK(patch(u, bar) == 0);
+    CHECK(!contains(report, "replacing"));
+    const Bytes both = slurp(copy);
+    {
+        pex::Script s;
+        CHECK(pex::read(both.data(), both.size(), s) == pex::Status::Ok);
+        CHECK(ref_with_ip_order(s, 0) == 0xA21 && ref_with_ip_order(s, 1) == 0xA22);
+    }
+    CHECK(patch(u, foo) == 0);
+    CHECK(patch(u, bar) == 0);
+    CHECK(slurp(copy) == both);
+
+    // An earlier installed copy, not reinstalled since, is still ours.
+    CHECK(contains(winner(output), "Later.bsa:"));
+
+    // The same archive name with new contents is a new winner too.
+    const Bytes v3 = compile_script("Upd", source("    Game.GetFormFromFile(0x821, \"Foo.esp\")\n    Game.GetFormFromFile(0x823, \"Other.esm\")\n").c_str());
+    spit(data / "Later.bsa", build_bsa(0x3, {{"scripts", "upd.pex", v3}}));
+    CHECK(patch(u, foo) == 0);
+    CHECK(contains(report, "replacing"));
+    CHECK(slurp(copy) != both);
+
+    // The new winner has nothing for this plugin: the copy would only override
+    // it with an old script, so it goes.
+    const Bytes none = compile_script("Upd", source("    Game.GetFormFromFile(0x823, \"Other.esm\")\n").c_str());
+    spit(data / "Last.bsa", build_bsa(0x3, {{"scripts", "upd.pex", none}}));
+    u.dryRun = true;
+    CHECK(patch(u, foo) == 0);
+    CHECK(contains(report, "would remove"));
+    CHECK(fs::exists(copy));
+    u.dryRun = false;
+    CHECK(patch(u, foo) == 0);
+    CHECK(contains(report, "REMOVED|"));
+    CHECK(contains(text, "\nremoved|upd.pex|Last.bsa:"));
+    CHECK(contains(text, "\nremoved|1\n"));
+    CHECK(!fs::exists(copy));
+
+    // A loose file from a new mod is a new winner, and is not mistaken for ours.
+    const Bytes loose = compile_script("Upd", source("    Game.GetFormFromFile(0x821, \"Foo.esp\")\n    Game.GetFormFromFile(0x824, \"Other.esm\")\n").c_str());
+    spit(data / "Scripts" / "upd.pex", loose);
+    CHECK(contains(winner(output), "Scripts"));
+    CHECK(patch(u, foo) == 0);
+    CHECK(only_ref(slurp(copy)) == 0xA21);
+    CHECK(slurp(copy).size() == loose.size());
+
+    // Installing that copy hides the mod's loose file under ours. It stays the
+    // winner: falling back to the archive would rebuild from an older script.
+    const std::string looseSource = winner(output);
+    const Bytes fromLoose = slurp(copy);
+    spit(data / "Scripts" / "upd.pex", fromLoose);
+    CHECK(winner(output) == looseSource);
+    CHECK(patch(u, foo) == 0);
+    CHECK(!contains(report, "replacing") && !contains(report, "REMOVED"));
+    CHECK(slurp(copy) == fromLoose);
 }
 
 // --- finding the game ---------------------------------------------------------------
@@ -1384,6 +1535,7 @@ int main(int, char** argv) {
     test_loose(dir);
     test_extract(dir);
     test_out(dir);
+    test_update(dir);
     test_find_game(dir);
     test_game_check(argv[0]);
     test_pairs(dir);
