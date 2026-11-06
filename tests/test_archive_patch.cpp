@@ -1124,6 +1124,23 @@ static void test_out(const fs::path& base) {
         CHECK(ref_with_ip_order(s, 0) == 0xE11);
         CHECK(ref_with_ip_order(s, 1) == 0xE12);
     }
+    // A new mod replaces the script: its copy is deleted from the output folder and
+    // both plugins run again. Neither may count as already applied to the new copy.
+    fs::remove(both / "scripts" / "TwoPlugins.pex");
+    const Bytes newer = compile_script("TwoPlugins",
+                                       "Scriptname TwoPlugins\nFunction F()\n    Game.GetFormFromFile(0x811, \"Foo.esp\")\n    Game.GetFormFromFile(0x812, \"Bar.esp\")\n    Game.GetFormFromFile(0x813, \"Other.esm\")\nEndFunction\n");
+    spit(data / "Scripts" / "TwoPlugins.pex", newer);
+    CHECK(patch_to_output(b, load_map("!PLUGIN=Foo.esp\n00000811|00000E11\n"), report, text) == 0);
+    CHECK(patch_to_output(b, load_map("!PLUGIN=Bar.esp\n00000812|00000E12\n"), report, text) == 0);
+    {
+        pex::Script s;
+        const Bytes bytes = slurp(both / "scripts" / "TwoPlugins.pex");
+        CHECK(pex::read(bytes.data(), bytes.size(), s) == pex::Status::Ok);
+        CHECK(ref_with_ip_order(s, 0) == 0xE11);
+        CHECK(ref_with_ip_order(s, 1) == 0xE12);
+        CHECK(bytes.size() > two.size());  // built from the new mod's version
+    }
+    spit(data / "Scripts" / "TwoPlugins.pex", two);
 
     // A rename changes the length, which is fine in a loose file.
     const fs::path renamed = root / "mod" / "renamed";

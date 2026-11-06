@@ -209,6 +209,10 @@ std::string pairs_hash(const pex::FormIdMap& map) {
     return buf;
 }
 
+// In the state file's plugin field: the output copy was rebuilt from a copy
+// outside the folder, so what earlier lines say about that script no longer holds.
+constexpr const char* kNewCopy = "*new-copy*";
+
 // (script, plugin) -> hash of the pairs already applied.
 std::map<std::pair<std::string, std::string>, std::string> read_output_state(const fs::path& file) {
     std::map<std::pair<std::string, std::string>, std::string> out;
@@ -222,7 +226,12 @@ std::map<std::pair<std::string, std::string>, std::string> read_output_state(con
         if (line.empty() || line[0] == '#') continue;
         const size_t a = line.find('|'), b = a == std::string::npos ? a : line.find('|', a + 1);
         if (b == std::string::npos) continue;
-        out[{line.substr(0, a), line.substr(a + 1, b - a - 1)}] = line.substr(b + 1);
+        const std::string script = line.substr(0, a), plugin = line.substr(a + 1, b - a - 1);
+        if (plugin == kNewCopy) {
+            for (auto it = out.lower_bound({script, std::string()}); it != out.end() && it->first.first == script;) it = out.erase(it);
+            continue;
+        }
+        out[{script, plugin}] = line.substr(b + 1);
     }
     return out;
 }
@@ -836,6 +845,7 @@ int patch_to_output(const OutOptions& options, const pex::FormIdMap& map, std::s
             continue;
         }
         std::ofstream state(stateFile, std::ios::binary | std::ios::app);
+        if (slot.copy->kind != CopyKind::Output) state << *slot.key << "|" << kNewCopy << "|\n";
         state << *slot.key << "|" << pluginKey << "|" << thisHash << "\n";
         state.close();
         if (!state) {
