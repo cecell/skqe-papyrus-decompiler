@@ -4,6 +4,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "event_names.hpp"
 #include "ir.hpp"
+#include "papyrus/canon.hpp"
+#include "papyrus/compile.hpp"
 #include "papyrus/decompile.hpp"
 #include "papyrus/layout.hpp"
 
@@ -11,6 +13,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <set>
@@ -93,9 +96,15 @@ int prec_of(const Expr& e) {
 bool is_zero_int(const Expr& e) { return e.kind == ExprKind::Lit && e.lit.type == ValueType::Integer && e.lit.as_int() == 0; }
 bool is_minus_one_int(const Expr& e) { return e.kind == ExprKind::Lit && e.lit.type == ValueType::Integer && e.lit.as_int() == -1; }
 
+// An ElseIf / nested-If choice: the function (named as the canonical
+// comparison names it) and the inner If's first instruction.
+using OpenSite = std::pair<std::string, size_t>;
+
 class Writer {
 public:
-    Writer(const Script& s, const DecompileOptions& opt) : m_s(s), m_opt(opt) {
+    Writer(const Script& s, const DecompileOptions& opt, const std::set<OpenSite>* flip = nullptr,
+           std::vector<OpenSite>* sites = nullptr)
+        : m_s(s), m_opt(opt), m_flip(flip), m_sites(sites) {
         for (const UserFlag& f : s.userFlags) {
             const std::string n = lower(s.str(f.name));
             if (n == "hidden") m_hiddenMask |= 1u << f.bit;
@@ -113,6 +122,16 @@ public:
         r.source = std::move(m_out);
         r.functions = std::move(m_reports);
         return r;
+    }
+
+    // One expression / one statement line for render_expr / render_stmt.
+    std::string render(const FnContext& c, const Expr* e, const Stmt* st, const std::map<StrIdx, std::string>* names) const {
+        Ctx ctx;
+        ctx.c = &c;
+        if (names) ctx.names = *names;
+        ctx.returnsNone = lower(m_s.str(c.f.returnType)) == "none";
+        if (st) return stmt_line(*st, ctx);
+        return e ? expr(*e, 0, false, Context::Value, ctx) : std::string();
     }
 
 private:
@@ -423,6 +442,12 @@ private:
         rep.state = state;
         rep.name = name;
         rep.instructions = f.code.size();
+        // The key canonical_equal uses in Difference::where (src/canon.cpp).
+        if (name.size() > 4 && (name.compare(name.size() - 4, 4, ".get") == 0 || name.compare(name.size() - 4, 4, ".set") == 0)) {
+            m_fnKey = lower(rep.object) + ".prop " + lower(name);
+        } else {
+            m_fnKey = lower(rep.object) + "." + (state.empty() ? "" : lower(state) + ".") + lower(name);
+        }
 
         FnContext c(m_s, o, f, m_opt.resolver);
         Ctx ctx;
@@ -733,48 +758,60 @@ private:
         return "";
     }
 
-    void statement(const Stmt& st, int depth, const Ctx& ctx) {
+    // The text of a statement's own line, without the line comment.
+    std::string stmt_line(const Stmt& st, const Ctx& ctx) const {
         switch (st.kind) {
         case StmtKind::Decl: {
             std::string t = st.declType + " " + st.declName;
             if (st.rhs) t += " = " + expr(*st.rhs, 0, false, Context::Value, ctx);
-            line(depth, t + line_comment(st, ctx));
-            break;
+            return t;
         }
-        case StmtKind::Expr: line(depth, expr(*st.rhs, 0, false, Context::Value, ctx) + line_comment(st, ctx)); break;
+        case StmtKind::Expr: return expr(*st.rhs, 0, false, Context::Value, ctx);
         case StmtKind::Assign: {
-            if (st.lhs->kind == ExprKind::Var && ctx.c->is_nonevar(st.lhs->name)) {
-                // "::NoneVar = f()": the discarded result of a call statement.
-                line(depth, expr(*st.rhs, 0, false, Context::Value, ctx) + line_comment(st, ctx));
-                break;
-            }
+            // "::NoneVar = f()": the discarded result of a call statement.
+            if (st.lhs->kind == ExprKind::Var && ctx.c->is_nonevar(st.lhs->name)) return expr(*st.rhs, 0, false, Context::Value, ctx);
             // x = x op e  ->  x op= e
             const Expr& r = *st.rhs;
             if (st.lhs->kind == ExprKind::Var && r.kind == ExprKind::Binary && r.kids.size() == 2 &&
                 r.kids[0]->kind == ExprKind::Var && r.kids[0]->name == st.lhs->name &&
                 (r.op == "+" || r.op == "-" || r.op == "*" || r.op == "/" || r.op == "%")) {
-                line(depth, expr(*st.lhs, 0, false, Context::Value, ctx) + " " + r.op + "= " +
-                                expr(*r.kids[1], 0, false, Context::Value, ctx) + line_comment(st, ctx));
-                break;
+                return expr(*st.lhs, 0, false, Context::Value, ctx) + " " + r.op + "= " + expr(*r.kids[1], 0, false, Context::Value, ctx);
             }
-            line(depth, expr(*st.lhs, 0, false, Context::Value, ctx) + " = " + expr(*st.rhs, 0, false, Context::Value, ctx) +
-                            line_comment(st, ctx));
-            break;
+            return expr(*st.lhs, 0, false, Context::Value, ctx) + " = " + expr(*st.rhs, 0, false, Context::Value, ctx);
         }
         case StmtKind::Return:
-            if (ctx.returnsNone || !st.rhs) line(depth, "Return" + line_comment(st, ctx));
-            else line(depth, "Return " + expr(*st.rhs, 0, false, Context::Value, ctx) + line_comment(st, ctx));
-            break;
+            if (ctx.returnsNone || !st.rhs) return "Return";
+            return "Return " + expr(*st.rhs, 0, false, Context::Value, ctx);
+        case StmtKind::If: return "If " + expr(*st.rhs, 0, false, Context::Condition, ctx);
+        case StmtKind::While: return "While " + expr(*st.rhs, 0, false, Context::Condition, ctx);
+        }
+        return "";
+    }
+
+    void statement(const Stmt& st, int depth, const Ctx& ctx) {
+        switch (st.kind) {
+        case StmtKind::Decl:
+        case StmtKind::Expr:
+        case StmtKind::Assign:
+        case StmtKind::Return: line(depth, stmt_line(st, ctx) + line_comment(st, ctx)); break;
         case StmtKind::If: {
-            line(depth, "If " + expr(*st.rhs, 0, false, Context::Condition, ctx) + line_comment(st, ctx));
+            line(depth, stmt_line(st, ctx) + line_comment(st, ctx));
             for (const StmtPtr& s : st.body) statement(*s, depth + 1, ctx);
             const Stmt* cur = &st;
             // ElseIf and a nested If differ only in temp allocation
             // (else_if_collapsible below, docs/COMPILER_PATTERNS.md "Temps").
-            while (cur->elseBody.size() == 1 && cur->elseBody[0]->kind == StmtKind::If &&
-                   else_if_collapsible(*cur->elseBody[0], ctx)) {
+            // The rule's reading is the starting point (an open choice reads
+            // as ElseIf); the compiler replay (decompile() below) may flip any
+            // site whose function does not compile back to the original.
+            while (cur->elseBody.size() == 1 && cur->elseBody[0]->kind == StmtKind::If) {
+                const Stmt& inner = *cur->elseBody[0];
+                const OpenSite site{m_fnKey, inner.ip};
+                if (m_sites) m_sites->push_back(site);
+                bool nested = else_if_collapsible(inner, ctx) == Reading::Nested;
+                if (m_flip && m_flip->count(site)) nested = !nested;
+                if (nested) break;
                 cur = cur->elseBody[0].get();
-                line(depth, "ElseIf " + expr(*cur->rhs, 0, false, Context::Condition, ctx) + line_comment(*cur, ctx));
+                line(depth, "Else" + stmt_line(*cur, ctx) + line_comment(*cur, ctx));
                 for (const StmtPtr& s : cur->body) statement(*s, depth + 1, ctx);
             }
             if (!cur->elseBody.empty()) {
@@ -785,7 +822,7 @@ private:
             break;
         }
         case StmtKind::While:
-            line(depth, "While " + expr(*st.rhs, 0, false, Context::Condition, ctx) + line_comment(st, ctx));
+            line(depth, stmt_line(st, ctx) + line_comment(st, ctx));
             for (const StmtPtr& s : st.body) statement(*s, depth + 1, ctx);
             line(depth, "EndWhile");
             break;
@@ -857,10 +894,13 @@ private:
                next.args[0].type == ValueType::Identifier && next.args[0].str() == ins.args[0].str();
     }
 
-    static bool else_if_collapsible(const Stmt& inner, const Ctx& ctx) {
-        if (inner.condTemp == 0 || inner.elseBody.empty()) return true;
+    enum class Reading { ElseIf, Nested, Open };
+
+    static Reading else_if_collapsible(const Stmt& inner, const Ctx& ctx) {
+        // No temp, or no else part: both readings compile the same.
+        if (inner.condTemp == 0 || inner.elseBody.empty()) return Reading::ElseIf;
         const Function& f = ctx.c->f;
-        if (inner.ipEnd > f.code.size()) return true;
+        if (inner.ipEnd > f.code.size()) return Reading::Open;
         // The else part starts after the then-branch's jump to the end label
         // (a statement's own ip can sit after a folded temp's write).
         size_t elseStart = inner.elseBody.front()->ip;
@@ -872,7 +912,7 @@ private:
                 break;
             }
         }
-        if (elseStart >= inner.ipEnd) return true;
+        if (elseStart >= inner.ipEnd) return Reading::ElseIf;
         const std::string type = ctx.c->type_of(inner.condTemp);
         auto temp_number = [&](StrIdx name) -> long long {
             const std::string_view n = ctx.c->s.str(name);
@@ -888,27 +928,27 @@ private:
         for (size_t ip = elseStart; ip < inner.ipEnd; ++ip) {
             const Instruction& ins = f.code[ip];
             const StrIdx dest = written_temp(ins, ctx);
-            if (dest == inner.condTemp) return true;
+            if (dest == inner.condTemp) return Reading::ElseIf;
             if (dest && ctx.c->type_of(dest) == type && !is_accumulator_write(f, ip)) {
                 const bool fifo = !is_accumulator_alloc(f, ip);
-                if (fifo && temp_number(dest) > maxSeen) return false;
-                if (fifo && std::find(released.begin(), released.end(), dest) != released.end()) return false;
+                if (fifo && temp_number(dest) > maxSeen) return Reading::Nested;
+                if (fifo && std::find(released.begin(), released.end(), dest) != released.end()) return Reading::Nested;
                 if (std::find(released.begin(), released.end(), dest) == released.end()) released.push_back(dest);
             }
             for (const Value& v : ins.args) {
                 if (v.type == ValueType::Identifier && ctx.c->is_temp(v.str())) maxSeen = std::max(maxSeen, temp_number(v.str()));
             }
         }
-        if (released.empty()) return true;
+        if (released.empty()) return Reading::Open;
         for (size_t ip = inner.ipEnd; ip < f.code.size(); ++ip) {
             const StrIdx dest = written_temp(f.code[ip], ctx);
-            if (dest == inner.condTemp) return true;
+            if (dest == inner.condTemp) return Reading::ElseIf;
             if (dest && std::find(released.begin(), released.end(), dest) != released.end() && !is_accumulator_write(f, ip) &&
                 !is_accumulator_alloc(f, ip)) {
-                return false;
+                return Reading::Nested;
             }
         }
-        return true;
+        return Reading::Open;
     }
 
     // --- expressions ----------------------------------------------------------------
@@ -1061,14 +1101,213 @@ private:
     DecompileOptions m_opt;
     std::string m_out;
     std::vector<FunctionReport> m_reports;
+    const std::set<OpenSite>* m_flip = nullptr;   // ElseIf / nested sites to read the other way
+    std::vector<OpenSite>* m_sites = nullptr;     // every such site met, in writing order
+    std::string m_fnKey;                          // the function being written, as canon names it
     uint32_t m_hiddenMask = 0, m_conditionalMask = 0;
     mutable std::map<std::string, std::string> m_niceTypes;
 };
 
 }  // namespace
 
+namespace {
+
+// The resolver's compiled scripts as declaration stubs for the compiler.
+class StubSourceResolver : public psc::SourceResolver {
+public:
+    explicit StubSourceResolver(ScriptResolver* r) : m_r(r) {}
+    bool find(std::string_view name, psc::SourceFile& out) override {
+        const Script* s = m_r->find(name);
+        if (!s || s->objects.empty()) return false;
+        DecompileOptions d;
+        d.declarationsOnly = true;
+        d.optionalObjectParams = true;
+        d.resolver = m_r;
+        d.verifyWithCompiler = false;
+        out.name = std::string(s->str(s->objects[0].name));
+        out.path = out.name + ".psc";
+        out.text = decompile(*s, d).source;
+        return true;
+    }
+
+private:
+    ScriptResolver* m_r;
+};
+
+// Functions of a script by the key canon uses in Difference::where
+// (lowercased "object.state.name", "object.name", "object.prop name.get").
+std::map<std::string, const Function*> functions_by_key(const Script& s) {
+    std::map<std::string, const Function*> out;
+    for (const Object& o : s.objects) {
+        const std::string on = lower(s.str(o.name));
+        for (const Property& p : o.properties) {
+            if (p.getter) out[on + ".prop " + lower(s.str(p.name)) + ".get"] = &*p.getter;
+            if (p.setter) out[on + ".prop " + lower(s.str(p.name)) + ".set"] = &*p.setter;
+        }
+        for (const State& st : o.states) {
+            const std::string sn = lower(s.str(st.name));
+            for (const NamedFunction& f : st.functions) {
+                out[on + "." + (sn.empty() ? "" : sn + ".") + lower(s.str(f.name))] = &f.body;
+            }
+        }
+    }
+    return out;
+}
+
+// The first instruction where two bodies differ with temps renamed by first
+// appearance (so a numbering shift from an earlier function does not count),
+// or SIZE_MAX when they are the same program with the same temp structure.
+size_t divergence(const Script& sa, const Function& a, const Script& sb, const Function& b) {
+    std::map<StrIdx, size_t> ra, rb;
+    auto same = [&](const Value& x, const Value& y) {
+        if (x.type != y.type) return false;
+        if (x.type == ValueType::Identifier) {
+            const std::string_view nx = sa.str(x.str()), ny = sb.str(y.str());
+            const bool tx = nx.size() > 6 && nx.substr(0, 6) == "::temp", ty = ny.size() > 6 && ny.substr(0, 6) == "::temp";
+            if (tx != ty) return false;
+            if (tx) {
+                const size_t ix = ra.emplace(x.str(), ra.size()).first->second;
+                const size_t iy = rb.emplace(y.str(), rb.size()).first->second;
+                return ix == iy;
+            }
+            return lower(nx) == lower(ny);
+        }
+        if (x.type == ValueType::String) return sa.str(x.str()) == sb.str(y.str());
+        return x.bits == y.bits;
+    };
+    const size_t n = std::min(a.code.size(), b.code.size());
+    for (size_t ip = 0; ip < n; ++ip) {
+        const Instruction& x = a.code[ip];
+        const Instruction& y = b.code[ip];
+        if (x.op != y.op || x.args.size() != y.args.size()) return ip;
+        for (size_t k = 0; k < x.args.size(); ++k) {
+            if (!same(x.args[k], y.args[k])) return ip;
+        }
+    }
+    if (a.code.size() != b.code.size()) return n;
+    if (a.locals.size() != b.locals.size()) return n;  // a temp allocated that the code never shows
+    return SIZE_MAX;
+}
+
+}  // namespace
+
 DecompileResult decompile(const Script& script, const DecompileOptions& opt) {
-    return Writer(script, opt).run();
+    std::set<OpenSite> force;
+    std::vector<OpenSite> open;
+    DecompileResult result = Writer(script, opt, &force, &open).run();
+    if (!opt.verifyWithCompiler || !opt.resolver || opt.declarationsOnly || open.empty() || script.objects.empty()) return result;
+
+    // Replay through the compiler: the ElseIf / nested choices of a function
+    // whose compiled temps differ from the original are flipped until the
+    // function compiles identically (every subset of its sites up to ten,
+    // single flips beyond). The rule's reading stays when nothing matches.
+    StubSourceResolver resolver(opt.resolver);
+    psc::CompileOptions co;
+    co.resolver = &resolver;
+    for (const UserFlag& f : script.userFlags) {
+        psc::UserFlagDef def;
+        def.name = std::string(script.str(f.name));
+        def.bit = f.bit;
+        co.flags.push_back(def);
+    }
+    const std::string scriptName(script.str(script.objects[0].name));
+    auto compile_text = [&](const std::string& text, Script& out) {
+        psc::SourceFile src;
+        src.name = scriptName;
+        src.path = scriptName + ".psc";
+        src.text = text;
+        std::vector<psc::Diagnostic> diags;
+        return psc::compile(src, co, out, diags);
+    };
+    Script ours;
+    if (!compile_text(result.source, ours)) return result;
+    // Sites per function, in writing order, each function's by instruction.
+    std::vector<std::string> fns;
+    std::map<std::string, std::vector<size_t>> sitesOf;
+    for (const OpenSite& site : open) {
+        if (!sitesOf.count(site.first)) fns.push_back(site.first);
+        std::vector<size_t>& v = sitesOf[site.first];
+        if (std::find(v.begin(), v.end(), site.second) == v.end()) v.push_back(site.second);
+    }
+    const std::map<std::string, const Function*> originals = functions_by_key(script);
+    // For each function that does not compile back: find the first instruction
+    // whose temps differ, flip the nearest site before it, keep the flip when
+    // the divergence moves on, and repeat; a function with few sites gets
+    // every combination when the greedy walk stalls.
+    for (const std::string& fn : fns) {
+        auto fo = originals.find(fn);
+        if (fo == originals.end()) continue;
+        std::vector<size_t> sites = sitesOf[fn];
+        std::sort(sites.begin(), sites.end());
+        auto compiled_fn = [&](const Script& sc) -> const Function* {
+            const std::map<std::string, const Function*> m = functions_by_key(sc);
+            auto it = m.find(fn);
+            return it == m.end() ? nullptr : it->second;
+        };
+        const Function* cur = compiled_fn(ours);
+        if (!cur) continue;
+        size_t d = divergence(script, *fo->second, ours, *cur);
+        for (size_t round = 0; d != SIZE_MAX && round <= sites.size(); ++round) {
+            bool moved = false;
+            for (size_t k = sites.size(); k-- > 0;) {
+                if (sites[k] > d) continue;
+                const OpenSite site{fn, sites[k]};
+                std::set<OpenSite> trial = force;
+                if (!trial.insert(site).second) continue;
+                DecompileResult attempt = Writer(script, opt, &trial, nullptr).run();
+                Script compiled;
+                if (!compile_text(attempt.source, compiled)) continue;
+                const Function* cf = compiled_fn(compiled);
+                if (!cf) continue;
+                const size_t d2 = divergence(script, *fo->second, compiled, *cf);
+                if (d2 == SIZE_MAX || d2 > d) {
+                    force = std::move(trial);
+                    result = std::move(attempt);
+                    ours = std::move(compiled);
+                    d = d2;
+                    moved = true;
+                    break;
+                }
+            }
+            if (!moved) break;
+        }
+        if (d != SIZE_MAX && sites.size() <= 8) {
+            for (size_t mask = 1; mask < (size_t(1) << sites.size()); ++mask) {
+                std::set<OpenSite> trial = force;
+                for (size_t k = 0; k < sites.size(); ++k) {
+                    if (mask & (size_t(1) << k)) trial.insert({fn, sites[k]});
+                }
+                DecompileResult attempt = Writer(script, opt, &trial, nullptr).run();
+                Script compiled;
+                if (!compile_text(attempt.source, compiled)) continue;
+                const Function* cf = compiled_fn(compiled);
+                if (cf && divergence(script, *fo->second, compiled, *cf) == SIZE_MAX) {
+                    force = std::move(trial);
+                    result = std::move(attempt);
+                    ours = std::move(compiled);
+                    d = SIZE_MAX;
+                    break;
+                }
+            }
+        }
+    }
+    return result;
 }
 
 }  // namespace papyrus::pex
+
+namespace papyrus::pex::detail {
+
+std::string render_expr(const FnContext& c, const Expr& e, const std::map<StrIdx, std::string>* names) {
+    DecompileOptions opt;
+    opt.resolver = c.resolver;
+    return Writer(c.s, opt).render(c, &e, nullptr, names);
+}
+
+std::string render_stmt(const FnContext& c, const Stmt& st, const std::map<StrIdx, std::string>* names) {
+    DecompileOptions opt;
+    opt.resolver = c.resolver;
+    return Writer(c.s, opt).render(c, nullptr, &st, names);
+}
+
+}  // namespace papyrus::pex::detail

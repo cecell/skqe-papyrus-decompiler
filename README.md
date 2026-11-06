@@ -27,7 +27,7 @@ script on a modded machine, and the numbers are in the docs. What it does:
    a function that does not is emitted as a stub with its assembly, never
    taking the file with it. The score that matters is the round trip:
    decompile, compile with `PapyrusCompiler.exe`, compare with the original
-   at model level: **14,021 of the 14,026 vanilla scripts (99.96%) come back
+   at model level: **14,024 of the 14,026 vanilla scripts (99.99%) come back
    identical**, and over the whole modded folder **75,125 of 76,593 (98.08%;
    99.0% of those whose dependencies exist at all)**; docs/ROUNDTRIP.md
    explains every class of the rest.

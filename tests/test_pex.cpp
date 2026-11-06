@@ -8,11 +8,13 @@
 #include "papyrus/canon.hpp"
 #include "papyrus/compile.hpp"
 #include "papyrus/decompile.hpp"
+#include "papyrus/diff.hpp"
 #include "papyrus/pex.hpp"
 #include "compile/dotnet_hashtable.hpp"
 
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <filesystem>
@@ -946,29 +948,6 @@ static void test_dotnet_hashtable_order() {
     CHECK(papyrus::dotnet::string_hash_64("waitingforactor") == 847524731);
 }
 
-static void test_elseif_rule() {
-    Script s;
-    std::string err;
-    CHECK_STATUS(assemble(kElseIfListing, s, &err), Status::Ok);
-    const DecompileResult r = decompile(s);
-    CHECK(r.all_ok());
-    const std::string& src = r.source;
-    const size_t chain = src.find("Function Chain(");
-    const size_t nested = src.find("Function Nested(");
-    CHECK(chain != std::string::npos && nested != std::string::npos && chain < nested);
-    if (chain == std::string::npos || nested == std::string::npos) return;
-    const std::string chainText = src.substr(chain, nested - chain);
-    const std::string nestedText = src.substr(nested);
-    // Chain: the ElseIf temps were reused, so the chain comes back flat.
-    CHECK(chainText.find("    ElseIf a == c\n") != std::string::npos);
-    CHECK(chainText.find("    ElseIf b == c\n") != std::string::npos);
-    CHECK(chainText.find("        If a == c\n") == std::string::npos);
-    // Nested: each inner If allocated a fresh temp while its outer's was
-    // held, so the else parts stay nested.
-    CHECK(nestedText.find("    Else\n        If a == c\n") != std::string::npos);
-    CHECK(nestedText.find("        Else\n            If b == c\n") != std::string::npos);
-    CHECK(nestedText.find("ElseIf") == std::string::npos);
-}
 
 static void write_seeds(const fs::path& dir) {
     std::error_code ec;
@@ -1018,6 +997,58 @@ bool compile_sample(MapResolver& r, const std::string& name, Script& out) {
     return ok;
 }
 }  // namespace
+
+static void test_elseif_rule() {
+    Script s;
+    std::string err;
+    CHECK_STATUS(assemble(kElseIfListing, s, &err), Status::Ok);
+    const DecompileResult r = decompile(s);
+    CHECK(r.all_ok());
+    const std::string& src = r.source;
+    const size_t chain = src.find("Function Chain(");
+    const size_t nested = src.find("Function Nested(");
+    CHECK(chain != std::string::npos && nested != std::string::npos && chain < nested);
+    if (chain == std::string::npos || nested == std::string::npos) return;
+    const std::string chainText = src.substr(chain, nested - chain);
+    const std::string nestedText = src.substr(nested);
+    // Chain: the ElseIf temps were reused, so the chain comes back flat.
+    CHECK(chainText.find("    ElseIf a == c\n") != std::string::npos);
+    CHECK(chainText.find("    ElseIf b == c\n") != std::string::npos);
+    CHECK(chainText.find("        If a == c\n") == std::string::npos);
+    // Nested: each inner If allocated a fresh temp while its outer's was
+    // held, so the else parts stay nested.
+    CHECK(nestedText.find("    Else\n        If a == c\n") != std::string::npos);
+    CHECK(nestedText.find("        Else\n            If b == c\n") != std::string::npos);
+    CHECK(nestedText.find("ElseIf") == std::string::npos);
+
+    // With a resolver the output is compiled back with the built-in compiler
+    // and every ElseIf / nested site may be flipped until the function's
+    // temps match the original (DecompileOptions::verifyWithCompiler): the
+    // rule's readings above are right, so nothing changes.
+    MapResolver sources;
+    sources.sources["scriptobject"] = "Scriptname ScriptObject\nFunction GotoState(string asNewState) native\nstring Function GetState() native\n";
+    sources.sources["form"] = "Scriptname Form extends ScriptObject\n";
+    sources.sources["objectreference"] = "Scriptname ObjectReference extends Form\nFunction Take(Int a, Int b, Int c)\nEndFunction\n";
+    struct Resolver : ScriptResolver {
+        std::map<std::string, const Script*> scripts;
+        const Script* find(std::string_view name) override {
+            std::string key(name);
+            for (char& ch : key) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            auto it = scripts.find(key);
+            return it == scripts.end() ? nullptr : it->second;
+        }
+    } resolver;
+    Script objectReference, form, scriptObject;
+    CHECK(compile_sample(sources, "ObjectReference", objectReference));
+    CHECK(compile_sample(sources, "Form", form));
+    CHECK(compile_sample(sources, "ScriptObject", scriptObject));
+    resolver.scripts = {{"objectreference", &objectReference}, {"form", &form}, {"scriptobject", &scriptObject}};
+    DecompileOptions verified;
+    verified.resolver = &resolver;
+    const DecompileResult rv = decompile(s, verified);
+    CHECK(rv.all_ok());
+    CHECK(rv.source == r.source);
+}
 
 // The compiler's spelling and allocation rules that the vanilla oracle
 // cannot see (docs/COMPILER_PATTERNS.md; probes/Probe04_Spelling.psc):
@@ -1405,7 +1436,411 @@ EndEvent
     for (const Finding& f : b.findings) unknownStates += f.rule == "gotostate-unknown";
     CHECK(unknownStates == 1);  // "Bussy" only: "None" and the GetState flag "Flag" are not reported
     CHECK(count(b, "OnUpdate") == 0);  // the script has GotoState, so the re-arm has an exit
-    CHECK(audit_rules().size() == 12);
+    CHECK(count(b, "OnItemAdded") == 0);  // filtered, and no quest call
+    CHECK(audit_rules().size() == 17);
+    // The message carries the counter nobody reads.
+    for (const Finding& f : a.findings) {
+        if (f.function == "LoopPollsWithWait") CHECK(f.message.find("tries counts them") != std::string::npos);
+    }
+}
+
+// --- diff ---------------------------------------------------------------------
+// Two versions of a hand-written script compiled with our own compiler against
+// stub declarations; every sentence kind of docs/DIFF.md has a case here.
+
+static const char* kDiffStubs[][2] = {
+    {"scriptobject", R"(Scriptname ScriptObject
+Function RegisterForSingleUpdate(float afInterval) native
+Function RegisterForUpdate(float afInterval) native
+Function GotoState(string asNewState) native
+string Function GetState() native
+Event OnInit()
+EndEvent
+Event OnUpdate()
+EndEvent
+)"},
+    {"form", "Scriptname Form extends ScriptObject\n"},
+    {"objectreference", R"(Scriptname ObjectReference extends Form
+Function Enable(bool abFadeIn = false) native
+Function Disable(bool abFadeOut = false) native
+bool Function IsDisabled() native
+bool Function Is3DLoaded() native
+Function Activate(ObjectReference akActivator) native
+Function AddItem(Form akItem, int aiCount = 1) native
+Function Give(Form akItem, ObjectReference akTo = None) native
+Event OnActivate(ObjectReference akActionRef)
+EndEvent
+)"},
+    {"actor", "Scriptname Actor extends ObjectReference\nbool Function IsDead() native\n"},
+    {"quest", "Scriptname Quest extends Form\nbool Function Start() native\nFunction Stop() native\n"},
+    {"game", "Scriptname Game\nForm Function GetFormFromFile(int aiFormID, string asFilename) native global\nActor Function GetPlayer() native global\n"},
+    {"utility", "Scriptname Utility\nFunction Wait(float afSeconds) native global\n"},
+    {"debug", "Scriptname Debug\nFunction Trace(string asText) native global\nFunction Notification(string asText) native global\n"},
+};
+
+static const char* kDiffOld = R"(Scriptname DiffSample extends ObjectReference
+
+Float Property Interval = 1.0 Auto
+Int Property Count Auto
+Bool Property Gone Auto
+Int Property Level Auto
+Quest Property MyQuest Auto
+Form Property MyForm Auto
+
+Int oldVar
+Int renamedVar
+Int flagCount = 1
+Bool flag
+
+Function Reset(Bool abForce, Int aiCount)
+    Count = 0
+EndFunction
+
+Function Retype(Int aiValue)
+EndFunction
+
+Function Rename(Int aiOld)
+    Count = aiOld
+EndFunction
+
+Int Function Returns()
+    Return 1
+EndFunction
+
+Function Removed()
+EndFunction
+
+Event OnInit()
+    RegisterForSingleUpdate(1.0)
+    Debug.Trace("old")
+    Form f = Game.GetFormFromFile(0x000D62, "Mod.esp")
+    Form g = Game.GetFormFromFile(0x000100, "Old.esp")
+    Debug.Notification("Hello")
+    Count += 1
+    renamedVar = 2
+EndEvent
+
+Event OnActivate(ObjectReference akActionRef)
+    If akActionRef == Game.GetPlayer()
+        MyQuest.Start()
+    EndIf
+    If flag && Is3DLoaded()
+        Enable()
+    EndIf
+    If Level > 3
+        Disable()
+    EndIf
+    If IsDisabled()
+        Enable()
+    EndIf
+    If flag
+        MyQuest.Stop()
+    EndIf
+    Utility.Wait(1)
+EndEvent
+
+Event OnUpdate()
+    Int i = 0
+    While i < 10
+        i += 1
+    EndWhile
+    Debug.Trace("tick")
+EndEvent
+
+Function Emptied()
+    Debug.Trace("x")
+EndFunction
+
+Function Filled()
+EndFunction
+
+Function Rewritten()
+    Debug.Trace("a")
+    Debug.Trace("b")
+    Debug.Trace("c")
+    Debug.Trace("d")
+    Debug.Trace("e")
+    Debug.Trace("f")
+EndFunction
+
+Function Unwrapped()
+    If flag
+        Enable()
+    EndIf
+EndFunction
+
+Function Chain(Int aiMode)
+    If aiMode == 1
+        Enable()
+    ElseIf aiMode == 2
+        Disable()
+    ElseIf aiMode == 3
+        Debug.Trace("three")
+    Else
+        Debug.Trace("other")
+    EndIf
+EndFunction
+
+Function Args(Actor akActor)
+    AddItem(MyForm, 1)
+    Activate(akActor)
+    Give(MyForm)
+    akActor.AddItem(MyForm, flagCount)
+EndFunction
+
+State Busy
+    Event OnUpdate()
+    EndEvent
+EndState
+)";
+
+static const char* kDiffNew = R"(Scriptname DiffSample extends Actor
+
+Float Property Interval = 2.0 Auto
+Int Property Total Auto
+Float Property Level Auto
+Quest Property MyQuest Auto
+Form Property MyForm Auto
+Bool Property Added Auto
+
+Int betterVar
+Int flagCount = 2
+Bool flag
+Bool newVar
+
+Function Reset(Int aiCount)
+    Total = 0
+EndFunction
+
+Function Retype(Float aiValue)
+EndFunction
+
+Function Rename(Int aiNew)
+    Total = aiNew
+EndFunction
+
+Bool Function Returns()
+    Return True
+EndFunction
+
+Function Added(Int aiValue)
+    Total = aiValue
+EndFunction
+
+Event OnInit()
+    RegisterForSingleUpdate(5.0)
+    Form f = Game.GetFormFromFile(0x000D63, "Mod.esp")
+    Form g = Game.GetFormFromFile(0x000100, "New.esp")
+    Debug.Notification("Hi")
+    Total += 1
+    betterVar = 2
+    RegisterForUpdate(2.0)
+    GotoState("Idle")
+EndEvent
+
+Event OnActivate(ObjectReference akActionRef)
+    If akActionRef == Game.GetPlayer() && !IsDisabled()
+        MyQuest.Start()
+    EndIf
+    If flag
+        Enable()
+    EndIf
+    If Level >= 3
+        Disable()
+    EndIf
+    If !IsDisabled()
+        Enable()
+    EndIf
+    If flag
+        MyQuest.Start()
+    EndIf
+    Utility.Wait(1.0)
+    newVar = True
+EndEvent
+
+Event OnUpdate()
+    Int idx = 0
+    While idx < 10
+        idx += 1
+    EndWhile
+    If flag
+        Debug.Trace("tick")
+    EndIf
+EndEvent
+
+Function Emptied()
+EndFunction
+
+Function Filled()
+    Debug.Trace("y")
+    Utility.Wait(0.5)
+EndFunction
+
+Function Rewritten()
+    Utility.Wait(1.0)
+    Utility.Wait(2.0)
+    Utility.Wait(3.0)
+    Utility.Wait(4.0)
+    Utility.Wait(5.0)
+    Utility.Wait(6.0)
+EndFunction
+
+Function Unwrapped()
+    Enable()
+EndFunction
+
+Function Chain(Int aiMode)
+    If aiMode == 1
+        Enable()
+    ElseIf aiMode == 4
+        Utility.Wait(4.0)
+    ElseIf aiMode == 2
+        Disable()
+    ElseIf aiMode == 3
+        Debug.Trace("three")
+    Else
+        Debug.Trace("else")
+    EndIf
+EndFunction
+
+Function Args(Actor akActor)
+    akActor.AddItem(MyForm, 1)
+    Activate(Self)
+    Give(MyForm, akActor)
+    akActor.AddItem(MyForm, flagCount + 1)
+EndFunction
+
+State Idle
+    Event OnUpdate()
+    EndEvent
+EndState
+)";
+
+namespace {
+// The compiled stubs, for the renderer's parent chain and declarations.
+struct CompiledResolver : ScriptResolver {
+    std::map<std::string, Script> scripts;
+    const Script* find(std::string_view name) override {
+        std::string key(name);
+        for (char& ch : key) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        auto it = scripts.find(key);
+        return it == scripts.end() ? nullptr : &it->second;
+    }
+};
+}  // namespace
+
+static void test_diff() {
+    MapResolver oldR, newR;
+    CompiledResolver compiled;
+    for (const auto& stub : kDiffStubs) {
+        oldR.sources[stub[0]] = stub[1];
+        newR.sources[stub[0]] = stub[1];
+    }
+    for (const auto& stub : kDiffStubs) CHECK(compile_sample(oldR, stub[0], compiled.scripts[stub[0]]));
+    oldR.sources["diffsample"] = kDiffOld;
+    newR.sources["diffsample"] = kDiffNew;
+    Script oldS, newS;
+    CHECK(compile_sample(oldR, "DiffSample", oldS));
+    CHECK(compile_sample(newR, "DiffSample", newS));
+
+    // The same program is reported as such, whatever the source spelling.
+    CHECK(diff(oldS, oldS).equal);
+
+    DiffOptions dopt;
+    dopt.resolver = &compiled;
+    const DiffResult r = diff(oldS, newS, dopt);
+    if (std::getenv("PEX_TEST_DUMP")) {
+        for (const Change& c : r.changes) std::fprintf(stderr, "%s | %s | %s | %u/%u\n", c.kind.c_str(), c.function.c_str(), c.message.c_str(), c.line, c.oldLine);
+    }
+    CHECK(!r.equal);
+    CHECK(r.functionsSkipped == 0);
+    auto has = [&](const char* kind, const char* text, const char* function = nullptr) {
+        for (const Change& c : r.changes) {
+            if (c.kind == kind && c.message.find(text) != std::string::npos && (!function || c.function == function)) return true;
+        }
+        std::fprintf(stderr, "  missing: %s containing \"%s\"\n", kind, text);
+        return false;
+    };
+    auto count = [&](const char* kind) {
+        size_t n = 0;
+        for (const Change& c : r.changes) n += c.kind == kind;
+        return n;
+    };
+    // Layer 1: declarations.
+    CHECK(has("parent-changed", "now extends `Actor` instead of `ObjectReference`"));
+    CHECK(has("property-default-changed", "`Interval` changed from 1.0 to 2.0"));
+    CHECK(has("property-renamed", "`Count` was renamed to `Total`"));
+    CHECK(has("property-removed", "`Gone` (Bool) was removed"));
+    CHECK(has("property-added", "`Added` (Bool) was added"));
+    CHECK(has("property-retyped", "`Level` is now Float, was Int"));
+    CHECK(count("property-added") == 1);  // Total is a rename, not an addition
+    CHECK(has("variable-removed", "`oldVar` (Int) was removed"));
+    CHECK(has("variable-renamed", "`renamedVar` was renamed to `betterVar`"));
+    CHECK(has("variable-added", "`newVar` (Bool) was added"));
+    CHECK(count("variable-added") == 1);
+    CHECK(has("variable-default-changed", "`flagCount` changed from 1 to 2"));
+    CHECK(has("state-removed", "`busy` was removed with its 1 function"));
+    CHECK(has("state-added", "`Idle` was added with 1 function"));
+    CHECK(count("function-removed") == 1);  // the removed state's functions are not listed one by one
+    CHECK(count("function-added") == 1);
+    CHECK(has("function-removed", "`Removed()` was removed"));
+    CHECK(has("function-added", "`Added(Int aiValue)` was added (1 statement)"));
+    CHECK(has("parameter-removed", "`Reset` lost its `abForce` parameter", "Reset"));
+    CHECK(has("parameter-retyped", "`aiValue` of `Retype` is now Float, was Int", "Retype"));
+    CHECK(has("parameter-renamed", "`aiOld` of `Rename` was renamed to `aiNew`", "Rename"));
+    CHECK(has("return-type-changed", "`Returns` now returns Bool, was Int", "Returns"));
+    // A renamed parameter or property used the same way is not a change.
+    CHECK(count("statement-changed") == 0);
+    for (const Change& c : r.changes) CHECK(c.function != "Rename" || c.kind == "parameter-renamed");
+    // Layers 2 and 3: bodies.
+    CHECK(has("literal-changed", "`1.0` became `5.0` in `RegisterForSingleUpdate(5.0)`", "OnInit"));
+    CHECK(has("call-removed", "`Debug.Trace(\"old\")` was removed", "OnInit"));
+    CHECK(has("formid-changed", "`0x000D62` became `0x000D63`", "OnInit"));
+    CHECK(has("plugin-changed", "`\"Old.esp\"` became `\"New.esp\"`", "OnInit"));
+    CHECK(has("string-changed", "`\"Hello\"` became `\"Hi\"`", "OnInit"));
+    CHECK(has("registration-added", "`RegisterForUpdate(2.0)` was added", "OnInit"));
+    CHECK(has("state-change-added", "`GotoState(\"Idle\")` was added", "OnInit"));
+    CHECK(has("condition-gained-term", "gained `&& !IsDisabled()`", "OnActivate"));
+    CHECK(has("condition-lost-term", "lost `&& Is3DLoaded()`", "OnActivate"));
+    CHECK(has("operator-changed", "`>` became `>=`", "OnActivate"));
+    CHECK(has("condition-negated", "`IsDisabled()` is now negated", "OnActivate"));
+    CHECK(has("callee-changed", "`Start()` is called instead of `Stop()`", "OnActivate"));
+    CHECK(has("assignment-added", "`newVar = True` was added", "OnActivate"));
+    // Utility.Wait(1) and Utility.Wait(1.0) mean the same: no sentence.
+    for (const Change& c : r.changes) CHECK(c.message.find("Wait(1") == std::string::npos);
+    CHECK(has("local-renamed", "`i` was renamed to `idx`", "OnUpdate"));
+    CHECK(has("if-wrapped", "`If flag` now guards `Debug.Trace(\"tick\")`", "OnUpdate"));
+    for (const Change& c : r.changes) CHECK(c.function != "OnUpdate" || c.kind == "local-renamed" || c.kind == "if-wrapped");
+    CHECK(has("function-emptied", "`Emptied` was emptied (1 statement removed)", "Emptied"));
+    CHECK(has("call-removed", "`Debug.Trace(\"x\")` was removed", "Emptied"));
+    CHECK(has("function-filled", "`Filled`, which was empty, now has 2 statements", "Filled"));
+    CHECK(has("call-added", "`Debug.Trace(\"y\")` was added", "Filled"));
+    CHECK(has("call-added", "`Utility.Wait(0.5)` was added", "Filled"));
+    CHECK(has("statements-changed", "6 statements removed and 6 statements added", "Rewritten"));
+    CHECK(has("calls-added", "`Utility.Wait()` was added in that run", "Rewritten"));
+    CHECK(has("calls-removed", "`Debug.Trace()` was removed in that run", "Rewritten"));
+    CHECK(has("if-unwrapped", "`If flag` was removed from around `Enable(False)`", "Unwrapped"));
+    CHECK(has("if-added", "`ElseIf aiMode == 4` was added with 1 statement inside", "Chain"));
+    CHECK(has("string-changed", "`\"other\"` became `\"else\"`", "Chain"));
+    size_t chainSentences = 0;
+    for (const Change& c : r.changes) chainSentences += c.function == "Chain";
+    CHECK(chainSentences == 2);
+    CHECK(has("receiver-changed", "`AddItem()` is now called on `akActor` instead of `Self`", "Args"));
+    CHECK(has("argument-changed", "`Self` is passed to `Activate()` instead of `akActor`", "Args"));
+    CHECK(has("argument-changed", "`flagCount + 1` is passed to `AddItem()` instead of `flagCount`", "Args"));
+    CHECK(has("argument-added", "`akActor` is now passed to `Give()` where that argument was omitted", "Args"));
+    // Our compiler writes debug info: every statement sentence has a line.
+    for (const Change& c : r.changes) {
+        if (c.function.empty() || c.kind == "local-renamed" || c.kind.find("parameter") != std::string::npos || c.kind == "return-type-changed" ||
+            c.kind == "calls-added" || c.kind == "calls-removed")
+            continue;
+        CHECK(c.line > 0 || c.oldLine > 0);
+    }
+    // The text report groups by function.
+    const std::string text = diff_text(r);
+    CHECK(text.find("Event OnInit:\n") != std::string::npos);
+    CHECK(text.find("Function Args:\n") != std::string::npos);
+    CHECK(text.find("    line ") != std::string::npos);
 }
 
 int main(int argc, char** argv) {
@@ -1424,6 +1859,7 @@ int main(int argc, char** argv) {
     test_dotnet_hashtable_order();
     test_compile_rules();
     test_audit();
+    test_diff();
     if (g_failures) {
         std::fprintf(stderr, "%d failure(s)\n", g_failures);
         return 1;

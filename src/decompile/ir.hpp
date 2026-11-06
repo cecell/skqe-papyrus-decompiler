@@ -7,6 +7,7 @@
 #include "papyrus/decompile.hpp"
 #include "papyrus/pex.hpp"
 
+#include <map>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -153,5 +154,12 @@ struct FunctionIR {
 };
 FunctionIR lift_function(const FnContext& c);               // lift.cpp: decode, blocks, fold, &&/||
 std::vector<StmtPtr> structure_function(const FnContext& c, FunctionIR& ir);  // structure.cpp
+
+// The decompiler's spelling of one expression, and of one statement's own
+// line (an If or While gives its header, "If x > 0"; an Else part is not
+// part of it). `names` overrides the display names of slots (renamed or
+// materialised locals). For diagnostics and the diff (psc_writer.cpp).
+std::string render_expr(const FnContext& c, const Expr& e, const std::map<StrIdx, std::string>* names = nullptr);
+std::string render_stmt(const FnContext& c, const Stmt& st, const std::map<StrIdx, std::string>* names = nullptr);
 
 }  // namespace papyrus::pex::detail

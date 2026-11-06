@@ -73,6 +73,14 @@ struct DecompileOptions {
     bool declarationsOnly = false;
     // See ScriptResolver. Not owned.
     ScriptResolver* resolver = nullptr;
+    // `ElseIf` and a nested `If` inside `Else` compile to the same code
+    // except for the temp the condition takes, and the compiled file does
+    // not always tell them apart (docs/COMPILER_PATTERNS.md, "Temps"). With
+    // a resolver, each function whose choice stayed open is compiled both
+    // ways with the built-in compiler (the dependencies' declarations come
+    // from the resolver's compiled scripts) and the reading whose temps
+    // match the original is kept. Off: the open cases are written as ElseIf.
+    bool verifyWithCompiler = true;
 };
 
 struct DecompileResult {
