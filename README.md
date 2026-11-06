@@ -66,6 +66,17 @@ script on a modded machine, and the numbers are in the docs. What it does:
    function itself, while staying silent on the entries that merely run once
    per save. [docs/AUDIT.md](docs/AUDIT.md) explains every rule in plain
    language.
+7. **A semantic diff** (`pex diff`): what changed between two versions of a
+   script, in plain English and with no AI involved: declarations (a property
+   added, a parameter lost, a return type changed), then each function's
+   statements aligned (added, removed, changed, with the new version's source
+   line), with the meaning named where the trees allow it (a literal, FormID
+   or plugin name that changed, a condition that gained a term, a call or
+   registration added, an `If` wrapped around existing code, a local renamed
+   rather than changed). Measured on every vanilla script the Unofficial
+   Patch edits: 1,420 scripts, 1,225 changed, 5,319 sentences (median 2 per
+   script), 0.1 s; and on 308 pairs of mod scripts from the Vortex staging
+   folder. [docs/DIFF.md](docs/DIFF.md) has the sentences and the numbers.
 
 ## Use
 
@@ -116,6 +127,10 @@ pex decompile <input> [--out <path>] [--resolve <Data>]
                                  other scripts (parent chains, declarations)
 pex refs <input> [--csv]         FormID literals and their plugin names
 pex deps <input> [--resolve <Data>] [--vanilla <Misc.bsa>]
+pex diff <old> <new> [--resolve <Data>] [--json] [--quiet]
+                                 what changed between two versions of a script
+                                 (two files, or two folders or archives matched
+                                 by name), one sentence per change; docs/DIFF.md
 pex audit <input> [--resolve <Data>] [--json|--csv] [--rules]
                                  risks for script authors, one line per finding
                                  (file, function, source line, rule, advice) and
@@ -142,7 +157,9 @@ one millisecond per script single-threaded and the rest is creating 14,000
 files (writing the same files as assembly takes 7.5 s); the dependency
 closure of all 77,000 scripts (`closure`) 60 s single-threaded; auditing all
 77,047 script files (`audit --all-copies`, 321,124 function bodies lifted and structured) 1.1 s,
-the 14,026 vanilla ones 0.1 s (0.4 s on one thread). The checks
+the 14,026 vanilla ones 0.1 s (0.4 s on one thread); the semantic diff of the
+1,420 vanilla scripts the Unofficial Patch ships against their originals
+(`diff`) 0.1 s (0.8 s on one thread). The checks
 that run Bethesda's compiler take long because each script is a separate
 compiler run (the whole folder: 72 minutes, of which decompiling is 2);
 nothing in the normal workflow calls a compiler.

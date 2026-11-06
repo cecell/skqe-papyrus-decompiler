@@ -10,6 +10,7 @@
 #include "papyrus/canon.hpp"
 #include "papyrus/compile.hpp"
 #include "papyrus/decompile.hpp"
+#include "papyrus/diff.hpp"
 #include "papyrus/pex.hpp"
 #include "process.hpp"
 #include "resolver.hpp"
@@ -95,6 +96,24 @@ commands
                                (inherited states, declared types). Audits the
                                copy the game loads of each script (loose
                                beats archive); --all-copies audits every file.
+  diff <old> <new> [--resolve <dir|bsa>] [--json] [--quiet]
+                               what changed between two versions of a script,
+                               in plain English: declarations (properties,
+                               variables, functions, states, signatures),
+                               then each function's statements aligned
+                               (added, removed, changed, with the new
+                               version's source line), with the meaning
+                               named where it can be (a literal, FormID or
+                               plugin name that changed, a condition that
+                               gained a term, a call or registration added
+                               or removed, a local renamed). <old> and <new>
+                               are two .pex files, or two directories or
+                               archives whose scripts are matched by name
+                               (loose beats archive on each side).
+                               Byte-identical and canonically equal files
+                               say so in one line. --json: one object per
+                               script per line. --quiet: the status line of
+                               each script only (docs/DIFF.md)
   closure <script.pex> --data <Data> [--import <dir;dir>] [--emit <dir>] [--json]
                                walks every script the script needs, through
                                compiled files in --data; reports each as
@@ -1537,6 +1556,169 @@ int cmd_audit(int argc, char** argv) {
     return failures ? 1 : 0;
 }
 
+// --- diff -----------------------------------------------------------------
+
+int cmd_diff(int argc, char** argv) {
+    Options o;
+    if (!parse(argc, argv, 2, o, "diff")) return 2;
+    if (o.inputs.size() != 2) {
+        std::fprintf(stderr, "diff needs two inputs: the old and the new version (pex help)\n");
+        return 2;
+    }
+    std::vector<pextool::Item> oldItems, newItems;
+    std::vector<std::string> warnings;
+    for (int side = 0; side < 2; ++side) {
+        std::vector<pextool::Item>& items = side ? newItems : oldItems;
+        if (!pextool::enumerate(fs::u8path(o.inputs[side]), items, warnings)) {
+            std::fprintf(stderr, "%s: does not exist\n", o.inputs[side].c_str());
+            return 2;
+        }
+        if (!o.allCopies) items = pextool::effective_scripts(items);
+    }
+    for (const std::string& w : warnings) std::fprintf(stderr, "warning: %s\n", w.c_str());
+
+    // Pairs by script name; two single files pair up whatever their names.
+    struct PairItem {
+        std::string name;                  // lowercased file name
+        const pextool::Item* a = nullptr;  // null: only in new
+        const pextool::Item* b = nullptr;  // null: only in old
+    };
+    std::vector<PairItem> pairs;
+    const bool singlePair = oldItems.size() == 1 && newItems.size() == 1 && oldItems[0].archive.empty() && newItems[0].archive.empty() &&
+                            fs::is_regular_file(fs::u8path(o.inputs[0])) && fs::is_regular_file(fs::u8path(o.inputs[1]));
+    if (singlePair) {
+        pairs.push_back({newItems[0].name, &oldItems[0], &newItems[0]});
+    } else {
+        auto key_of = [](const pextool::Item& it) {
+            std::string k = it.name;
+            std::transform(k.begin(), k.end(), k.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+            return k;
+        };
+        std::map<std::string, PairItem> byName;
+        for (const pextool::Item& it : oldItems) byName[key_of(it)].a = &it;
+        for (const pextool::Item& it : newItems) byName[key_of(it)].b = &it;
+        for (auto& [k, p] : byName) {
+            p.name = k;
+            pairs.push_back(p);
+        }
+    }
+
+    std::vector<pextool::Item> extra;
+    if (!collect_resolve(o, extra)) return 2;
+    pextool::ItemResolver resolver;
+    resolver.add(extra);
+    resolver.add(oldItems);
+    resolver.add(newItems);
+    pex::DiffOptions dopt;
+    dopt.resolver = &resolver;
+
+    enum class St { Identical, Same, Changed, OnlyOld, OnlyNew, Unreadable };
+    std::vector<std::string> rows(pairs.size());
+    std::vector<St> status(pairs.size(), St::Unreadable);
+    std::atomic<size_t> sentences{0}, compared{0}, skipped{0};
+    std::atomic<int> failures{0};
+    std::mutex mu;
+    const auto t0 = std::chrono::steady_clock::now();
+    const char* kStatus[] = {"identical", "same-program", "changed", "only-old", "only-new", "unreadable"};
+    auto indent = [](const std::string& text, const char* prefix) {
+        std::string out;
+        size_t at = 0;
+        while (at < text.size()) {
+            const size_t nl = text.find('\n', at);
+            const size_t end = nl == std::string::npos ? text.size() : nl + 1;
+            out += prefix;
+            out.append(text, at, end - at);
+            at = end;
+        }
+        return out;
+    };
+    auto work = [&](size_t i, pextool::Loader& la, pextool::Loader& lb) {
+        const PairItem& p = pairs[i];
+        const std::string shown = singlePair ? p.b->label : p.name;
+        std::string text;
+        pex::DiffResult r;
+        if (!p.a || !p.b) {
+            status[i] = p.a ? St::OnlyOld : St::OnlyNew;
+            if (o.json) {
+                text = "{\"script\":" + json_str(p.name) + ",\"old\":" + json_str(p.a ? p.a->label : "") + ",\"new\":" + json_str(p.b ? p.b->label : "") +
+                       ",\"status\":\"" + kStatus[int(status[i])] + "\",\"changes\":[]}\n";
+            } else {
+                text = shown + ": " + (p.a ? "only in the old set" : "only in the new set") + "\n";
+            }
+            rows[i] = std::move(text);
+            return;
+        }
+        pex::Script sa, sb;
+        std::vector<uint8_t> ba, bb;
+        if (!load_script(*p.a, la, sa, mu, &ba) || !load_script(*p.b, lb, sb, mu, &bb)) {
+            ++failures;
+            status[i] = St::Unreadable;
+            if (o.json) {
+                text = "{\"script\":" + json_str(p.name) + ",\"old\":" + json_str(p.a->label) + ",\"new\":" + json_str(p.b->label) + ",\"status\":\"unreadable\",\"changes\":[]}\n";
+            } else {
+                text = shown + ": could not be read\n";
+            }
+            rows[i] = std::move(text);
+            return;
+        }
+        if (ba == bb) {
+            status[i] = St::Identical;
+        } else {
+            r = pex::diff(sa, sb, dopt);
+            status[i] = r.equal ? St::Same : St::Changed;
+            compared += r.functionsCompared;
+            skipped += r.functionsSkipped;
+            sentences += r.changes.size();
+        }
+        if (o.json) {
+            text = "{\"script\":" + json_str(p.name) + ",\"old\":" + json_str(p.a->label) + ",\"new\":" + json_str(p.b->label) + ",\"status\":\"" +
+                   kStatus[int(status[i])] + "\",\"changes\":[";
+            for (size_t k = 0; k < r.changes.size(); ++k) {
+                const pex::Change& c = r.changes[k];
+                if (k) text += ",";
+                text += "{\"object\":" + json_str(c.object) + ",\"state\":" + json_str(c.state) + ",\"function\":" + json_str(c.function) + ",\"kind\":" + json_str(c.kind) +
+                        ",\"line\":" + std::to_string(c.line) + ",\"oldLine\":" + std::to_string(c.oldLine) + ",\"message\":" + json_str(c.message) + "}";
+            }
+            text += "]}\n";
+        } else if (status[i] == St::Identical) {
+            text = shown + ": identical\n";
+        } else if (status[i] == St::Same) {
+            text = shown + ": the same program (the file was rewritten: names, order, debug lines or temporaries differ)\n";
+        } else {
+            text = shown + ": " + std::to_string(r.changes.size()) + (r.changes.size() == 1 ? " change" : " changes") + "\n";
+            if (!o.quiet) text += indent(pex::diff_text(r), "    ");
+        }
+        rows[i] = std::move(text);
+    };
+    unsigned threads = o.threads ? o.threads : std::max(1u, std::thread::hardware_concurrency());
+    threads = std::min<unsigned>(threads, static_cast<unsigned>(std::max<size_t>(1, pairs.size())));
+    std::atomic<size_t> next{0};
+    auto worker = [&] {
+        pextool::Loader la, lb;
+        for (;;) {
+            const size_t i = next.fetch_add(1);
+            if (i >= pairs.size()) break;
+            work(i, la, lb);
+        }
+    };
+    if (threads == 1) {
+        worker();
+    } else {
+        std::vector<std::thread> pool;
+        for (unsigned t = 0; t < threads; ++t) pool.emplace_back(worker);
+        for (std::thread& t : pool) t.join();
+    }
+    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    for (const std::string& row : rows) std::fputs(row.c_str(), stdout);
+    if (!singlePair) {
+        size_t n[6] = {0, 0, 0, 0, 0, 0};
+        for (St st : status) ++n[int(st)];
+        std::fprintf(stderr, "scripts in both %zu (%zu identical, %zu the same program, %zu changed, %zu unreadable)  only in old %zu  only in new %zu  sentences %zu  bodies compared %zu  skipped %zu  %.1fs\n",
+                     n[0] + n[1] + n[2] + n[5], n[0], n[1], n[2], n[5], n[3], n[4], sentences.load(), compared.load(), skipped.load(), secs);
+    }
+    return failures ? 1 : 0;
+}
+
 int cmd_closure(int argc, char** argv) {
     Options o;
     if (!parse(argc, argv, 2, o, "closure")) return 2;
@@ -1770,6 +1952,7 @@ int main(int argc, char** argv_) {
     if (cmd == "refs") return cmd_refs(argc, argv.data());
     if (cmd == "deps") return cmd_deps(argc, argv.data());
     if (cmd == "audit") return cmd_audit(argc, argv.data());
+    if (cmd == "diff") return cmd_diff(argc, argv.data());
     if (cmd == "closure") return cmd_closure(argc, argv.data());
     if (cmd == "patch") return cmd_patch(argc, argv.data());
     if (cmd == "check") return cmd_check(argc, argv.data());
