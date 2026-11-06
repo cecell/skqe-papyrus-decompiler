@@ -269,7 +269,14 @@ static bool plan(const Bytes& bytes, const pex::FormIdMap& map, MemberPatch& out
     CHECK(pex::read(bytes.data(), bytes.size(), s) == pex::Status::Ok);
     CHECK(pex::rewrite_check(bytes.data(), bytes.size()) == pex::Status::Ok);
     const pex::PatchResult r = pex::apply_formid_map(s, map);
-    return make_member_patch(std::string("A.bsa:") + kEntry, kEntry, bytes, s, r, out, why);
+    return make_member_patch(std::string("A.bsa:") + kEntry, kEntry, fs::path(), bytes, s, r, out, why);
+}
+
+static bool plan_loose(const fs::path& file, const Bytes& bytes, const pex::FormIdMap& map, MemberPatch& out, std::string& why) {
+    pex::Script s;
+    CHECK(pex::read(bytes.data(), bytes.size(), s) == pex::Status::Ok);
+    const pex::PatchResult r = pex::apply_formid_map(s, map);
+    return make_member_patch(file.u8string(), std::string(), file, bytes, s, r, out, why);
 }
 
 static int32_t ref_with_ip_order(const pex::Script& s, size_t index) {
@@ -625,6 +632,175 @@ static void test_rollback(const fs::path& dir) {
     CHECK(slurp(archive) == original);
 }
 
+// --- loose files --------------------------------------------------------------
+
+static void test_loose(const fs::path& dir) {
+    const fs::path folder = dir / "loose";
+    fs::create_directories(folder);
+    const Bytes script = compile_script("PatchMe", kPatchMe);
+    const fs::path a = folder / "a.pex", b = folder / "b.pex";
+    spit(a, script);
+    spit(b, script);
+    const pex::FormIdMap map = load_map(kMap);
+    MemberPatch ma, mb;
+    std::string why;
+    CHECK(plan_loose(a, script, map, ma, why));
+    CHECK(plan_loose(b, script, map, mb, why));
+
+    ArchivePatchOptions dry;
+    dry.dryRun = true;
+    patch_loose_members(folder, {&ma, &mb}, dry);
+    CHECK(!ma.failed && contains(ma.report, "DRYRUN|"));
+    CHECK(slurp(a) == script);
+    CHECK(!fs::exists(loose_journal_path(folder)));
+
+    ma.report.clear();
+    mb.report.clear();
+    patch_loose_members(folder, {&ma, &mb}, ArchivePatchOptions{});
+    CHECK(!ma.failed && !mb.failed);
+    CHECK(contains(ma.report, "PATCHED|") && contains(ma.report, "3 edits, 0 renames"));
+    CHECK(contains(mb.report, "JOURNAL|"));  // once, with the folder's last file
+    CHECK(slurp(a) == ma.newBytes);
+    CHECK(slurp(b) == mb.newBytes);
+
+    std::string report;
+    CHECK(undo_journal(loose_journal_path(folder), false, report) == 0);
+    CHECK(count_of(report, "UNDONE|") == 2);
+    CHECK(slurp(a) == script);
+    CHECK(slurp(b) == script);
+    report.clear();
+    CHECK(undo_journal(loose_journal_path(folder), false, report) == 0);
+    CHECK(contains(report, "nothing to undo"));
+
+    // A file that does not verify is rolled back and only that file.
+    MemberPatch ra, rb;
+    CHECK(plan_loose(a, script, map, ra, why));
+    CHECK(plan_loose(b, script, map, rb, why));
+    ArchivePatchOptions o;
+    o.afterWriteForTest = [&](const fs::path& f) {
+        if (f != b) return;
+        Bytes bytes = slurp(f);
+        bytes[rb.ranges[0].offset + 3] ^= 1;
+        spit(f, bytes);
+    };
+    patch_loose_members(folder, {&ra, &rb}, o);
+    CHECK(!ra.failed);
+    CHECK(rb.failed && contains(rb.report, "rolled back from the journal"));
+    CHECK(slurp(b) == script);
+    CHECK(slurp(a) == ra.newBytes);
+    report.clear();
+    CHECK(undo_journal(loose_journal_path(folder), false, report) == 0);
+    CHECK(slurp(a) == script);
+}
+
+// --- FormID pairs ---------------------------------------------------------------
+
+static void test_pairs(const fs::path& dir) {
+    uint32_t v = 0;
+    std::string why;
+    CHECK(parse_formid("0x00ABCD", v, why) && v == 0xABCD);
+    CHECK(parse_formid("0X0100abcd", v, why) && v == 0x0100ABCD);
+    CHECK(parse_formid("2049", v, why) && v == 2049);
+    CHECK(parse_formid("16777216", v, why) && v == 16777216);
+    CHECK(parse_formid("0", v, why) && v == 0);
+    // 0x with the wrong number of digits.
+    CHECK(!parse_formid("0x801", v, why));
+    CHECK(!parse_formid("0x00000801A", v, why));
+    CHECK(!parse_formid("0xGGGGGG", v, why));
+    // A hex value missing its prefix is refused, not read as decimal.
+    CHECK(!parse_formid("00ABCD", v, why) && contains(why, "0x prefix"));
+    CHECK(!parse_formid("000801", v, why) && contains(why, "leading zero"));
+    CHECK(!parse_formid("99999999999", v, why));
+    CHECK(!parse_formid("", v, why));
+
+    pex::FormIdMap map;
+    CHECK(add_formid_pairs("0x000801:0x000805, 2050 : 0x010A02", map, why));
+    CHECK(add_formid_pairs("0x0F000900:0x02FFFFFF", map, why));  // high bytes do not count
+    CHECK(map.oldToNew.size() == 3);
+    CHECK(map.oldToNew[0x801] == 0x805 && map.oldToNew[0x802] == 0x10A02 && map.oldToNew[0x900] == 0xFFFFFF);
+    // The same pair again is fine, a different NEW for one OLD is not.
+    CHECK(add_formid_pairs("0x000801:0x000805", map, why));
+    CHECK(!add_formid_pairs("0x01000801:0x000806", map, why) && contains(why, "mapped twice"));
+    CHECK(!add_formid_pairs("0x000801", map, why) && contains(why, "not OLD:NEW"));
+    CHECK(!add_formid_pairs("0x000801:", map, why));
+
+    const fs::path file = dir / "pairs.txt";
+    {
+        std::ofstream f(file, std::ios::binary);
+        f << "\xEF\xBB\xBF# a comment\r\n0x000801:0x000805\r\n\r\n  0x000802:0x000806,0x000803:0x000807  \n";
+    }
+    pex::FormIdMap fromFile;
+    CHECK(add_formid_pairs_file(file, fromFile, why));
+    CHECK(fromFile.oldToNew.size() == 3 && fromFile.oldToNew[0x803] == 0x807);
+    {
+        std::ofstream f(file, std::ios::binary | std::ios::trunc);
+        f << "0x000801:0x000805\nbad line\n";
+    }
+    CHECK(!add_formid_pairs_file(file, fromFile, why) && contains(why, "line 2"));
+}
+
+// --- the log ---------------------------------------------------------------------
+
+static void test_log() {
+    LogRun run;
+    run.started = "2026-11-05T12:00:00Z";
+    run.inputs = {"C:\\in"};
+    run.plugin = "Foo.esp";
+    run.source = "formid";
+    run.pairs = 2;
+
+    LogContainer archive;
+    archive.archive = true;
+    archive.path = "C:\\in\\A.bsa";
+    archive.journal = "C:\\in\\A.bsa.pexpatch.journal";
+    archive.scanned = 5;
+    LogFile good;
+    good.name = "scripts\\a.pex";
+    good.edits = 3;
+    good.pairs = {"00000801->00000805", "00000802->00000806"};
+    good.dynamic = 1;
+    archive.patched.push_back(good);
+    LogFile compressed;
+    compressed.name = "scripts\\b.pex";
+    compressed.reason = "compressed";
+    compressed.detail = "a|b";
+    archive.skipped.push_back(compressed);
+
+    LogContainer loose;
+    loose.path = "C:\\in\\Scripts";
+    loose.scanned = 2;
+    LogFile noEdit;
+    noEdit.name = "c.pex";
+    noEdit.reason = "no-edit";
+    noEdit.detail = "2 not in map, 0 dynamic";
+    noEdit.notInMap = 2;
+    loose.skipped.push_back(noEdit);
+
+    LogContainer quiet;  // counted, no section
+    quiet.path = "C:\\in\\Other";
+    quiet.scanned = 7;
+
+    const std::string text = render_patch_log(run, {loose, quiet, archive});
+    CHECK(text.rfind("pex patch log v1\nstarted|2026-11-05T12:00:00Z\nmode|write\ninput|C:\\in\nplugin|Foo.esp\nsource|formid\npairs|2\n", 0) == 0);
+    CHECK(contains(text, "\n[archive] C:\\in\\A.bsa\njournal|C:\\in\\A.bsa.pexpatch.journal\npatched|scripts\\a.pex|3|00000801->00000805,00000802->00000806|0|1\nskipped|scripts\\b.pex|compressed|a/b\nsubtotal|scanned 5|patched 1|edits 3|skipped 1\n"));
+    CHECK(contains(text, "\n[loose] C:\\in\\Scripts\nskipped|c.pex|no-edit|2 not in map, 0 dynamic\nsubtotal|scanned 2|patched 0|edits 0|skipped 1\n"));
+    CHECK(!contains(text, "C:\\in\\Other"));
+    CHECK(text.find("[archive]") < text.find("[loose]"));
+    CHECK(contains(text, "\n[totals]\narchives|1\nloose-folders|1\nscanned|14\npatched|1\nedits|3\nskipped|2\nskipped.compressed|1\nskipped.no-edit|1\nrefs-not-in-map|2\nrefs-dynamic|1\n"));
+
+    run.dryRun = true;
+    const std::string dry = render_patch_log(run, {archive});
+    CHECK(contains(dry, "mode|dry-run\n"));
+    CHECK(contains(dry, "would-patch|scripts\\a.pex|3|"));
+    CHECK(contains(dry, "|would-patch 1|"));
+    CHECK(!contains(dry, "\npatched|"));
+
+    CHECK(skip_reason_code("stored compressed (x)") == "compressed");
+    CHECK(skip_reason_code("its data block is shared with y") == "shared-block");
+    CHECK(skip_reason_code("inside an archive and the map renames the plugin") == "plugin-rename");
+    CHECK(skip_reason_code("cannot open") == "failed");
+}
+
 int main() {
     std::error_code ec;
     const fs::path dir = fs::temp_directory_path(ec) / ("skqe_archive_patch_" + std::to_string(static_cast<unsigned long long>(
@@ -640,6 +816,9 @@ int main() {
     test_undo_refuses(dir);
     test_refusals(dir);
     test_rollback(dir);
+    test_loose(dir);
+    test_pairs(dir);
+    test_log();
     fs::remove_all(dir, ec);
     if (g_failures) {
         std::fprintf(stderr, "%d check(s) failed\n", g_failures);

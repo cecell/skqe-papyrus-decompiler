@@ -361,28 +361,17 @@ bool edit_took(const std::vector<pex::FormRef>& refs, const pex::PatchEdit& ed) 
     return false;
 }
 
-// Reads the member back through the normal lookup and checks every edit took.
-bool verify_member(const bsa::Reader& r, const MemberPatch& m, const std::vector<std::string>& extra, std::string& why) {
-    bsa::Entry e;
-    bsa::Status st = r.find(m.entryPath, e);
-    if (st != bsa::Status::Ok) {
-        why = std::string("the patched member cannot be looked up: ") + bsa::to_string(st);
-        return false;
-    }
-    std::vector<uint8_t> back;
-    st = r.read(e, back);
-    if (st != bsa::Status::Ok) {
-        why = std::string("the patched member cannot be read: ") + bsa::to_string(st);
-        return false;
-    }
+// The bytes read back must be the ones planned, read as a script, and show
+// every edit.
+bool verify_bytes(const std::vector<uint8_t>& back, const MemberPatch& m, const std::vector<std::string>& extra, std::string& why) {
     if (back != m.newBytes) {
-        why = "the patched member's bytes are not the bytes planned";
+        why = "the patched bytes are not the bytes planned";
         return false;
     }
     pex::Script s;
     std::string err;
     if (pex::read(back.data(), back.size(), s, &err) != pex::Status::Ok) {
-        why = "the patched member does not read back: " + err;
+        why = "the patched script does not read back: " + err;
         return false;
     }
     const std::vector<pex::FormRef> refs = pex::find_form_refs(s, extra);
@@ -397,9 +386,27 @@ bool verify_member(const bsa::Reader& r, const MemberPatch& m, const std::vector
     return true;
 }
 
+// Reads the member back through the normal lookup and checks it.
+bool verify_member(const bsa::Reader& r, const MemberPatch& m, const std::vector<std::string>& extra, std::string& why) {
+    bsa::Entry e;
+    bsa::Status st = r.find(m.entryPath, e);
+    if (st != bsa::Status::Ok) {
+        why = std::string("the patched member cannot be looked up: ") + bsa::to_string(st);
+        return false;
+    }
+    std::vector<uint8_t> back;
+    st = r.read(e, back);
+    if (st != bsa::Status::Ok) {
+        why = std::string("the patched member cannot be read: ") + bsa::to_string(st);
+        return false;
+    }
+    return verify_bytes(back, m, extra, why);
+}
+
 void member_error(MemberPatch& m, const std::string& why) {
     m.report += "ERR|" + m.label + "|" + why + "\n";
     m.failed = true;
+    m.refusal = why;
 }
 
 // --- the journal -------------------------------------------------------------
@@ -537,8 +544,21 @@ uint64_t next_sequence(const fs::path& journal, std::string& why, bool& ok) {
     return parsed.lastSeq + 1;
 }
 
+// The member field of a journal line for a loose file. An archive's member path
+// always has a folder and a separator, so it cannot be this.
+constexpr const char* kLooseMember = "-";
+
 std::string archive_label(const fs::path& archive, const std::string& member) {
+    if (member == kLooseMember) return archive.u8string();
     return archive.filename().string() + ":" + member;
+}
+
+// Reads a whole file as bytes.
+bool read_bytes(const fs::path& p, std::vector<uint8_t>& out) {
+    std::ifstream in(p, std::ios::binary);
+    if (!in) return false;
+    out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    return !in.bad();
 }
 
 std::string patched_counts(const MemberPatch& m) {
@@ -612,16 +632,18 @@ bool compute_operand_ranges(const std::vector<uint8_t>& oldBytes, const std::vec
     return true;
 }
 
-bool make_member_patch(const std::string& label, const std::string& entryPath, const std::vector<uint8_t>& oldBytes,
-                       const pex::Script& patched, const pex::PatchResult& result, MemberPatch& out, std::string& why) {
+bool make_member_patch(const std::string& label, const std::string& entryPath, const fs::path& file,
+                       const std::vector<uint8_t>& oldBytes, const pex::Script& patched, const pex::PatchResult& result,
+                       MemberPatch& out, std::string& why) {
+    const std::string fallback = entryPath.empty() ? std::string("the file was left alone") : std::string(kLooseFallback);
     if (!result.renamedStrings.empty()) {
-        why = "inside an archive and the map renames the plugin, which changes the member's length; ";
-        why += kLooseFallback;
+        why = "inside an archive and the map renames the plugin, which changes the member's length; " + fallback;
         return false;
     }
     out = MemberPatch{};
     out.label = label;
     out.entryPath = entryPath;
+    out.file = file;
     out.oldBytes = oldBytes;
     out.edits = result.edits;
     std::string err;
@@ -631,7 +653,7 @@ bool make_member_patch(const std::string& label, const std::string& entryPath, c
     }
     if (out.newBytes.size() != oldBytes.size()) {
         why = "the member's size would change, from " + std::to_string(oldBytes.size()) + " to " + std::to_string(out.newBytes.size()) +
-              " bytes; " + kLooseFallback;
+              " bytes; " + fallback;
         return false;
     }
     pex::Script original;
@@ -640,8 +662,7 @@ bool make_member_patch(const std::string& label, const std::string& entryPath, c
         return false;
     }
     if (!compute_operand_ranges(oldBytes, out.newBytes, original, patched, result.edits, out.ranges, why)) {
-        why += "; ";
-        why += kLooseFallback;
+        why += "; " + fallback;
         return false;
     }
     return true;
@@ -846,6 +867,130 @@ void patch_archive_members(const fs::path& archive, std::vector<MemberPatch*> me
     if (!archiveLines.empty()) members.back()->report += archiveLines;
 }
 
+// --- loose files -------------------------------------------------------------
+
+fs::path loose_journal_path(const fs::path& folder) { return folder / "pexpatch.journal"; }
+
+void patch_loose_members(const fs::path& folder, std::vector<MemberPatch*> members, const ArchivePatchOptions& options) {
+    if (members.empty()) return;
+    std::error_code ec;
+    size_t linked = 0;
+    for (const MemberPatch* m : members) {
+        const auto links = fs::hard_link_count(m->file, ec);
+        if (!ec && links > 1) ++linked;
+    }
+    const fs::path absoluteFolder = fs::absolute(folder, ec);
+    const std::string folderText = (ec ? folder : absoluteFolder).u8string();
+    std::string folderLines;
+    if (linked)
+        folderLines += "NOTE|" + folderText + "|" + std::to_string(linked) +
+                       " of these files have other hard links (a mod manager's staging copy?); an overwrite changes them all\n";
+
+    if (options.dryRun) {
+        for (MemberPatch* m : members) m->report += "DRYRUN|" + m->label + "|" + std::to_string(m->edits.size()) + " edits, 0 renames\n";
+        if (!folderLines.empty()) members.back()->report += folderLines;
+        return;
+    }
+
+    // The bytes on disk must still be the ones planned from, and writable.
+    struct Ready {
+        MemberPatch* member;
+        std::string fileText;
+    };
+    std::vector<Ready> ready;
+    for (MemberPatch* m : members) {
+        const fs::path absoluteFile = fs::absolute(m->file, ec);
+        std::string fileText = (ec ? m->file : absoluteFile).u8string();
+        std::vector<uint8_t> onDisk;
+        std::string why;
+        RwFile probe;
+        if (!journal_safe(fileText) || !journal_safe(options.mapPath)) {
+            member_error(*m, "a path cannot go in the journal; the file was left alone");
+        } else if (!read_bytes(m->file, onDisk) || onDisk != m->oldBytes) {
+            member_error(*m, "the file changed since it was read; nothing written");
+        } else if (!probe.open(m->file, false, why)) {
+            member_error(*m, why);
+        } else {
+            ready.push_back({m, std::move(fileText)});
+        }
+    }
+    if (ready.empty()) {
+        if (!folderLines.empty()) members.back()->report += folderLines;
+        return;
+    }
+
+    const fs::path journal = loose_journal_path(folder);
+    std::string why;
+    bool ok = true;
+    uint64_t seq = next_sequence(journal, why, ok);
+    std::map<const MemberPatch*, std::vector<uint64_t>> seqs;
+    if (ok) {
+        const std::string now = utc_now();
+        std::string text;
+        for (const Ready& r : ready) {
+            for (const OperandRange& rg : r.member->ranges) {
+                text += "RANGE|" + std::to_string(seq) + "|" + r.fileText + "|" + kLooseMember + "|" + std::to_string(rg.offset) + "|" +
+                        to_hex(rg.oldBytes.data(), 4) + "|" + to_hex(rg.newBytes.data(), 4) + "|" + options.mapPath + "|" + now + "\n";
+                seqs[r.member].push_back(seq++);
+            }
+        }
+        ok = append_journal(journal, text, why);
+    }
+    if (!ok) {
+        for (const Ready& r : ready) member_error(*r.member, "nothing written: " + why);
+        if (!folderLines.empty()) members.back()->report += folderLines;
+        return;
+    }
+
+    size_t goodRanges = 0;
+    for (const Ready& r : ready) {
+        MemberPatch& m = *r.member;
+        if (options.backup) fs::copy_file(m.file, fs::path(m.file).concat(".bak"), fs::copy_options::overwrite_existing, ec);
+
+        auto write_ranges = [&](bool forward) {
+            RwFile f;
+            std::string err;
+            if (!f.open(m.file, false, err)) return false;
+            bool fine = true;
+            for (const OperandRange& rg : m.ranges) {
+                if (!f.write_at(rg.offset, forward ? rg.newBytes.data() : rg.oldBytes.data(), 4)) fine = false;
+            }
+            return f.flush() && fine;
+        };
+        auto roll_back = [&]() {
+            bool back = write_ranges(false);
+            std::vector<uint8_t> bytes;
+            if (back && (!read_bytes(m.file, bytes) || bytes != m.oldBytes)) back = false;
+            if (back) {
+                const std::string now = utc_now();
+                std::string text;
+                for (uint64_t s : seqs[&m]) text += "UNDONE|" + std::to_string(s) + "|" + now + "\n";
+                std::string err;
+                back = append_journal(journal, text, err);
+            }
+            return back;
+        };
+
+        std::string reason;
+        std::vector<uint8_t> back;
+        if (!write_ranges(true)) reason = "cannot write";
+        else {
+            if (options.afterWriteForTest) options.afterWriteForTest(m.file);
+            if (!read_bytes(m.file, back)) reason = "the patched file cannot be read";
+            else verify_bytes(back, m, options.extraCallees, reason);
+        }
+        if (!reason.empty()) {
+            member_error(m, reason + (roll_back() ? "; rolled back from the journal"
+                                                  : "; the roll back failed, run pex patch --undo " + journal.u8string()));
+            continue;
+        }
+        m.report += "PATCHED|" + m.label + "|" + std::to_string(m.edits.size()) + " edits, 0 renames\n";
+        goodRanges += m.ranges.size();
+    }
+    folderLines += "JOURNAL|" + folderText + "|" + journal.u8string() + "|" + std::to_string(goodRanges) + " ranges\n";
+    members.back()->report += folderLines;
+}
+
 // --- undo ------------------------------------------------------------------
 
 int undo_journal(const fs::path& journalFile, bool dryRun, std::string& report) {
@@ -871,6 +1016,7 @@ int undo_journal(const fs::path& journalFile, bool dryRun, std::string& report) 
     for (const JournalRange& r : parsed.ranges) byArchive[r.archive].push_back(&r);
 
     int failures = 0;
+    std::string marks;
     for (const auto& [archiveText, ranges] : byArchive) {
         const fs::path archive = fs::u8path(archiveText);
         RwFile file;
@@ -965,7 +1111,14 @@ int undo_journal(const fs::path& journalFile, bool dryRun, std::string& report) 
         }
         // Every member must still read as a script through the normal lookup.
         bool readable = true;
-        {
+        if (perMember.count(kLooseMember)) {
+            pex::Script s;
+            std::string err;
+            if (pex::read_file(archive, s, &err) != pex::Status::Ok) {
+                report += "ERR|" + archiveText + "|restored, but does not read as a script: " + err + "\n";
+                readable = false;
+            }
+        } else {
             bsa::Reader r;
             const bsa::Status st = r.open(archive);
             if (st != bsa::Status::Ok) {
@@ -987,18 +1140,215 @@ int undo_journal(const fs::path& journalFile, bool dryRun, std::string& report) 
         }
         if (!readable) ++failures;
         const std::string now = utc_now();
-        std::string marks;
         for (const JournalRange* r : ranges) marks += "UNDONE|" + std::to_string(r->seq) + "|" + now + "\n";
-        if (!append_journal(journalFile, marks, why)) {
-            report += "ERR|" + journalText + "|restored, but the journal cannot record it: " + why + "\n";
-            ++failures;
-        }
         for (const auto& [member, counts] : perMember) {
             report += "UNDONE|" + archive_label(archive, member) + "|" + std::to_string(counts.first) + " ranges, " +
                       std::to_string(bytesPerMember[member]) + " bytes restored, " + std::to_string(counts.second) + " already restored\n";
         }
     }
+    // Once, at the end: a folder's journal names one file per script. A stop
+    // before this line leaves bytes an undo finds already restored.
+    if (!marks.empty() && !append_journal(journalFile, marks, why)) {
+        report += "ERR|" + journalText + "|restored, but the journal cannot record it: " + why + "\n";
+        ++failures;
+    }
     return failures;
+}
+
+// --- FormID pairs ------------------------------------------------------------
+
+bool parse_formid(std::string_view text, uint32_t& out, std::string& why) {
+    const std::string shown(text);
+    if (text.size() > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) {
+        std::string_view digits = text.substr(2);
+        if (digits.size() != 6 && digits.size() != 8) {
+            why = "FormID " + shown + ": a hex FormID has 6 or 8 digits";
+            return false;
+        }
+        uint32_t v = 0;
+        for (char c : digits) {
+            int d = -1;
+            if (c >= '0' && c <= '9') d = c - '0';
+            else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+            else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+            if (d < 0) {
+                why = "FormID " + shown + ": not a hex number";
+                return false;
+            }
+            v = (v << 4) | static_cast<uint32_t>(d);
+        }
+        out = v;
+        return true;
+    }
+    if (text.empty()) {
+        why = "an empty FormID";
+        return false;
+    }
+    uint64_t v = 0;
+    for (char c : text) {
+        if ((c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+            why = "FormID " + shown + ": hex needs the 0x prefix";
+            return false;
+        }
+        if (c < '0' || c > '9') {
+            why = "FormID " + shown + ": neither 0x hex nor decimal";
+            return false;
+        }
+        v = v * 10 + static_cast<uint64_t>(c - '0');
+        if (v > 0xFFFFFFFFu) {
+            why = "FormID " + shown + ": does not fit 32 bits";
+            return false;
+        }
+    }
+    if (text.size() > 1 && text[0] == '0') {
+        why = "FormID " + shown + ": a leading zero looks like hex without its prefix; write 0x" + shown + ", or the decimal number without the zero";
+        return false;
+    }
+    out = static_cast<uint32_t>(v);
+    return true;
+}
+
+bool add_formid_pairs(std::string_view list, pex::FormIdMap& map, std::string& why) {
+    auto trim = [](std::string_view s) {
+        while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.remove_prefix(1);
+        while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.remove_suffix(1);
+        return s;
+    };
+    size_t pos = 0;
+    while (pos <= list.size()) {
+        size_t comma = list.find(',', pos);
+        if (comma == std::string_view::npos) comma = list.size();
+        const std::string_view pair = trim(list.substr(pos, comma - pos));
+        pos = comma + 1;
+        const size_t colon = pair.find(':');
+        if (colon == std::string_view::npos) {
+            why = "\"" + std::string(pair) + "\" is not OLD:NEW";
+            return false;
+        }
+        uint32_t oldId = 0, newId = 0;
+        if (!parse_formid(trim(pair.substr(0, colon)), oldId, why) || !parse_formid(trim(pair.substr(colon + 1)), newId, why)) return false;
+        const uint32_t key = oldId & 0xFFFFFFu, value = newId & 0xFFFFFFu;
+        const auto found = map.oldToNew.find(key);
+        if (found != map.oldToNew.end() && found->second != value) {
+            char buf[96];
+            std::snprintf(buf, sizeof buf, "%06X is mapped twice: to %06X and to %06X", static_cast<unsigned>(key),
+                          static_cast<unsigned>(found->second), static_cast<unsigned>(value));
+            why = buf;
+            return false;
+        }
+        map.oldToNew[key] = value;
+    }
+    return true;
+}
+
+bool add_formid_pairs_file(const fs::path& file, pex::FormIdMap& map, std::string& why) {
+    std::string text;
+    if (!read_whole(file, text)) {
+        why = "cannot read " + file.u8string();
+        return false;
+    }
+    if (text.rfind("\xEF\xBB\xBF", 0) == 0) text.erase(0, 3);
+    size_t pos = 0, lineNo = 0;
+    while (pos < text.size()) {
+        ++lineNo;
+        size_t nl = text.find('\n', pos);
+        if (nl == std::string::npos) nl = text.size();
+        std::string_view line(text.data() + pos, nl - pos);
+        pos = nl + 1;
+        while (!line.empty() && std::isspace(static_cast<unsigned char>(line.front()))) line.remove_prefix(1);
+        while (!line.empty() && std::isspace(static_cast<unsigned char>(line.back()))) line.remove_suffix(1);
+        if (line.empty() || line[0] == '#') continue;
+        if (!add_formid_pairs(line, map, why)) {
+            why = file.u8string() + " line " + std::to_string(lineNo) + ": " + why;
+            return false;
+        }
+    }
+    return true;
+}
+
+// --- the log ------------------------------------------------------------------
+
+std::string skip_reason_code(const std::string& why) {
+    if (why.find("stored compressed") != std::string::npos) return "compressed";
+    if (why.find("shared with") != std::string::npos) return "shared-block";
+    if (why.find("renames the plugin") != std::string::npos) return "plugin-rename";
+    if (why.find("not byte-exact") != std::string::npos) return "not-byte-exact";
+    return "failed";
+}
+
+std::string render_patch_log(const LogRun& run, std::vector<LogContainer> containers) {
+    std::sort(containers.begin(), containers.end(), [](const LogContainer& a, const LogContainer& b) {
+        return a.archive != b.archive ? a.archive : a.path < b.path;
+    });
+    const char* patchedWord = run.dryRun ? "would-patch" : "patched";
+    std::string out = "pex patch log v1\n";
+    out += "started|" + run.started + "\n";
+    out += std::string("mode|") + (run.dryRun ? "dry-run" : "write") + "\n";
+    for (const std::string& in : run.inputs) out += "input|" + in + "\n";
+    out += "plugin|" + run.plugin + "\n";
+    out += "source|" + run.source + "\n";
+    out += "pairs|" + std::to_string(run.pairs) + "\n";
+
+    size_t archives = 0, folders = 0, scanned = 0, patched = 0, edits = 0, skipped = 0, notInMap = 0, dynamic = 0;
+    std::map<std::string, size_t> reasons;
+    for (const LogContainer& c : containers) {
+        scanned += c.scanned;
+        if (c.patched.empty() && c.skipped.empty()) continue;
+        ++(c.archive ? archives : folders);
+        out += "\n";
+        out += std::string(c.archive ? "[archive] " : "[loose] ") + c.path + "\n";
+        if (!c.journal.empty()) out += "journal|" + c.journal + "\n";
+        size_t localEdits = 0;
+        for (const LogFile& f : c.patched) {
+            out += std::string(patchedWord) + "|" + f.name + "|" + std::to_string(f.edits) + "|";
+            for (size_t i = 0; i < f.pairs.size(); ++i) out += (i ? "," : "") + f.pairs[i];
+            out += "|" + std::to_string(f.notInMap) + "|" + std::to_string(f.dynamic) + "\n";
+            localEdits += f.edits;
+            notInMap += f.notInMap;
+            dynamic += f.dynamic;
+        }
+        for (const LogFile& f : c.skipped) {
+            std::string detail = f.detail;
+            std::replace(detail.begin(), detail.end(), '|', '/');
+            std::replace(detail.begin(), detail.end(), '\n', ' ');
+            out += "skipped|" + f.name + "|" + f.reason + "|" + detail + "\n";
+            ++reasons[f.reason];
+            notInMap += f.notInMap;
+            dynamic += f.dynamic;
+        }
+        out += "subtotal|scanned " + std::to_string(c.scanned) + "|" + patchedWord + " " + std::to_string(c.patched.size()) + "|edits " +
+               std::to_string(localEdits) + "|skipped " + std::to_string(c.skipped.size()) + "\n";
+        patched += c.patched.size();
+        edits += localEdits;
+        skipped += c.skipped.size();
+    }
+    out += "\n[totals]\n";
+    out += "archives|" + std::to_string(archives) + "\n";
+    out += "loose-folders|" + std::to_string(folders) + "\n";
+    out += "scanned|" + std::to_string(scanned) + "\n";
+    out += std::string(patchedWord) + "|" + std::to_string(patched) + "\n";
+    out += "edits|" + std::to_string(edits) + "\n";
+    out += "skipped|" + std::to_string(skipped) + "\n";
+    for (const auto& [reason, n] : reasons) out += "skipped." + reason + "|" + std::to_string(n) + "\n";
+    out += "refs-not-in-map|" + std::to_string(notInMap) + "\n";
+    out += "refs-dynamic|" + std::to_string(dynamic) + "\n";
+    return out;
+}
+
+std::string utc_timestamp() { return utc_now(); }
+
+fs::path default_log_path(const fs::path& firstInput) {
+    std::error_code ec;
+    fs::path p = fs::absolute(firstInput, ec);
+    if (ec) p = firstInput;
+    p = p.lexically_normal();
+    if (!p.has_filename()) p = p.parent_path();
+    const fs::path dir = p.parent_path();
+    std::string stamp = utc_now();
+    stamp.erase(std::remove_if(stamp.begin(), stamp.end(), [](char c) { return c == '-' || c == ':'; }), stamp.end());
+    fs::path candidate = dir / ("pex-patch-" + stamp + ".log");
+    for (int n = 2; fs::exists(candidate, ec) && n < 1000; ++n) candidate = dir / ("pex-patch-" + stamp + "-" + std::to_string(n) + ".log");
+    return candidate;
 }
 
 }  // namespace pextool

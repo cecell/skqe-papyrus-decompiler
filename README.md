@@ -139,15 +139,19 @@ pex audit <input> [--resolve <Data>] [--json|--csv] [--rules]
                                  (file, function, source line, rule, advice) and
                                  a summary by rule; docs/AUDIT.md
 pex closure <script.pex> --data <Data> [--import <dirs>] [--emit <dir>]
-pex patch <input> --map <FormIDMap> [--dry-run] [--backup]
-                                 renumbers FormID literals; loose files are
-                                 rewritten, scripts inside a .bsa overwritten in
-                                 place (4 bytes per literal, journaled, read back
-                                 through the archive's hash lookup); a rename, a
-                                 compressed member or a shared data block is
-                                 refused; docs/INTEGRATION.md
+pex patch <input> --plugin <Name.esp> --formid OLD:NEW[,OLD:NEW] [--formids <file>]
+                  [--log <file>] [--dry-run] [--backup]
+pex patch <input> --map <FormIDMap> [--log <file>] [--dry-run] [--backup]
+                                 scans a file, folder or archive and renumbers
+                                 FormID literals, loose and inside archives: 4
+                                 bytes per literal overwritten in place, journaled,
+                                 read back; an archive member that is compressed,
+                                 shares its data block or would be renamed is
+                                 refused; a log by archive and folder;
+                                 docs/INTEGRATION.md
 pex patch --undo <journal> [--dry-run]
-                                 restores every byte a journal's patches changed
+                                 restores every byte a journal's patches changed;
+                                 a run writes one journal per archive and folder
 pex check --rewrite <input>      read + write, compare byte for byte
 pex check --asm <input> --tools "<game>\Papyrus Compiler"
 pex check --assemble <input> [--tools "<game>\Papyrus Compiler"]

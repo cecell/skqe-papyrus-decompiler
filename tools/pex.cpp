@@ -128,23 +128,32 @@ commands
                                own types, then what each dependency's
                                declarations name. --emit writes declaration
                                stubs (empty bodies) for the pex ones
-  patch <input> --map <FormIDMap> [--callee Name,...] [--dry-run] [--backup]
-                               renumbers FormID literals paired with the
-                               map's plugin (EslMapLib format), renames the
-                               plugin string when the map says so, writes
-                               the file and reads it back. A script inside a
-                               .bsa is overwritten in place when only FormIDs
-                               change: 4 bytes per literal, journaled first in
-                               <archive>.pexpatch.journal, read back through
-                               the archive's hash lookup, rolled back if that
-                               fails. Refused, with the reason, for a rename,
-                               a compressed member or a data block shared with
-                               another member. --backup copies no archive
+  patch <input> --plugin <Name.esp> --formid OLD:NEW[,OLD:NEW] [--formid ...]
+            [--formids <file>] [--log <file>] [--callee Name,...] [--dry-run] [--backup]
+  patch <input> --map <FormIDMap> [--log <file>] [--callee Name,...] [--dry-run] [--backup]
+                               scans the input (a file, a folder, an archive)
+                               and renumbers FormID literals paired with the
+                               plugin, loose and inside archives alike. A
+                               FormID is 0x plus 6 or 8 hex digits, or decimal;
+                               the low 24 bits count, each literal keeps its
+                               high byte. --formids: one OLD:NEW per line. --map
+                               is the same as an EslMapLib file, and renames the
+                               plugin string when it says so. Only FormIDs
+                               changing: 4 bytes per literal are overwritten,
+                               journaled first (<archive>.pexpatch.journal,
+                               <folder>\pexpatch.journal), read back, rolled
+                               back if that fails. An archive member is refused,
+                               with the reason, for a rename, compression or a
+                               data block shared with another member. --backup
+                               copies loose files only. --log writes a report by
+                               archive and folder; --formid writes one by default
+                               next to the input, unless --dry-run
                                (docs/INTEGRATION.md)
   patch --undo <journal> [--dry-run]
                                restores every byte the journal's patches
-                               changed; refuses if the archive holds anything
-                               the journal does not account for
+                               changed; refuses if a file holds anything the
+                               journal does not account for; run once per
+                               JOURNAL line of the patch
   check --rewrite <input>      read + write every script, compare byte for byte
   check --asm <input> --tools <dir>
                                assemble our listing with PapyrusAssembler.exe
@@ -232,6 +241,9 @@ struct Options {
     std::string map;
     std::string undo;
     std::string plugin;
+    std::vector<std::string> formids;
+    std::string formidsFile;
+    std::string log;
     std::string callees;
     bool csv = false;
     bool rules = false;
@@ -278,6 +290,9 @@ bool parse(int argc, char** argv, int from, Options& o, const char* cmd) {
         else if (a == "--backup") o.backup = true;
         else if (a == "--undo" && hasNext) o.undo = argv[++i];
         else if (a == "--plugin" && hasNext) o.plugin = argv[++i];
+        else if (a == "--formid" && hasNext) o.formids.push_back(argv[++i]);
+        else if (a == "--formids" && hasNext) o.formidsFile = argv[++i];
+        else if (a == "--log" && hasNext) o.log = argv[++i];
         else if (a == "--comments") o.comments = true;
         else if (a == "--keep-generated") o.keepGenerated = true;
         else if (a == "--optional-objects") o.optionalObjects = true;
@@ -1867,7 +1882,7 @@ int cmd_patch(int argc, char** argv) {
     Options o;
     if (!parse(argc, argv, 2, o, "patch")) return 2;
     if (!o.undo.empty()) {
-        if (!o.map.empty() || !o.inputs.empty()) {
+        if (!o.map.empty() || !o.plugin.empty() || !o.formids.empty() || !o.formidsFile.empty() || !o.log.empty() || !o.inputs.empty()) {
             std::fprintf(stderr, "patch --undo takes the journal alone\n");
             return 2;
         }
@@ -1876,24 +1891,69 @@ int cmd_patch(int argc, char** argv) {
         std::fputs(report.c_str(), stdout);
         return undoFailures ? 1 : 0;
     }
-    if (o.map.empty()) {
-        std::fprintf(stderr, "patch needs --map <FormIDMap file>\n");
+    const bool pairsGiven = !o.formids.empty() || !o.formidsFile.empty();
+    if (!o.map.empty() && (pairsGiven || !o.plugin.empty())) {
+        std::fprintf(stderr, "patch takes --map or --plugin with --formid, not both\n");
+        return 2;
+    }
+    if (o.map.empty() && (!pairsGiven || o.plugin.empty())) {
+        std::fprintf(stderr, "patch needs --map <FormIDMap file>, or --plugin <Name.esp> with --formid OLD:NEW or --formids <file>\n");
         return 2;
     }
     std::vector<pextool::Item> items;
     if (!collect(o, items)) return 2;
-    std::ifstream mf(fs::u8path(o.map), std::ios::binary);
-    if (!mf) {
-        std::fprintf(stderr, "cannot open %s\n", o.map.c_str());
-        return 2;
-    }
-    const std::string mapText((std::istreambuf_iterator<char>(mf)), std::istreambuf_iterator<char>());
     pex::FormIdMap map;
     std::string err;
-    if (!pex::load_formid_map(mapText, map, &err)) {
-        std::fprintf(stderr, "%s: %s\n", o.map.c_str(), err.c_str());
-        return 2;
+    if (o.map.empty()) {
+        map.plugin = o.plugin;
+        map.newPlugin = o.plugin;
+        for (const std::string& list : o.formids) {
+            if (!pextool::add_formid_pairs(list, map, err)) {
+                std::fprintf(stderr, "--formid: %s\n", err.c_str());
+                return 2;
+            }
+        }
+        if (!o.formidsFile.empty() && !pextool::add_formid_pairs_file(fs::u8path(o.formidsFile), map, err)) {
+            std::fprintf(stderr, "--formids: %s\n", err.c_str());
+            return 2;
+        }
+        if (map.oldToNew.empty()) {
+            std::fprintf(stderr, "patch: no FormID pairs given\n");
+            return 2;
+        }
+    } else {
+        std::ifstream mf(fs::u8path(o.map), std::ios::binary);
+        if (!mf) {
+            std::fprintf(stderr, "cannot open %s\n", o.map.c_str());
+            return 2;
+        }
+        const std::string mapText((std::istreambuf_iterator<char>(mf)), std::istreambuf_iterator<char>());
+        if (!pex::load_formid_map(mapText, map, &err)) {
+            std::fprintf(stderr, "%s: %s\n", o.map.c_str(), err.c_str());
+            return 2;
+        }
     }
+    // The log: asked for, or by default for a real --formid run. A dry run
+    // without --log writes nothing at all, wherever its input is. The file is
+    // created first, so nothing is patched without somewhere to report it.
+    fs::path logPath;
+    if (!o.log.empty()) logPath = fs::u8path(o.log);
+    else if (o.map.empty() && !o.dryRun) logPath = pextool::default_log_path(fs::u8path(o.inputs[0]));
+    if (!logPath.empty()) {
+        std::ofstream probe(logPath, std::ios::binary | std::ios::trunc);
+        if (!probe) {
+            std::fprintf(stderr, "cannot write the log %s\n", logPath.u8string().c_str());
+            return 2;
+        }
+    }
+    pextool::LogRun logRun;
+    logRun.started = pextool::utc_timestamp();
+    logRun.dryRun = o.dryRun;
+    logRun.inputs = o.inputs;
+    logRun.plugin = map.plugin;
+    logRun.source = o.map.empty() ? std::string("formid") : "map|" + o.map;
+    logRun.pairs = map.oldToNew.size();
+
     const std::vector<std::string> extra = split_list(o.callees, ',');
     std::printf("MAP|%s|%s|%zu entries\n", map.plugin.c_str(), map.newPlugin.c_str(), map.oldToNew.size());
     std::atomic<int> failures{0};
@@ -1903,24 +1963,44 @@ int cmd_patch(int argc, char** argv) {
         size_t row;
         pextool::MemberPatch patch;
     };
-    std::map<fs::path, std::vector<PlannedMember>> planned;
+    std::map<fs::path, std::vector<PlannedMember>> planned;       // by archive
+    std::map<fs::path, std::vector<PlannedMember>> plannedLoose;  // by folder
+    // What the log says about each item.
+    struct Outcome {
+        pextool::LogFile file;
+        bool patched = false;
+    };
+    std::vector<Outcome> outcomes(items.size());
     pextool::for_each_parallel(items, o.threads, [&](size_t i, const pextool::Item& it, pextool::Loader& ld) {
         std::string& out = rows[i];
+        Outcome& outcome = outcomes[i];
+        outcome.file.name = it.archive.empty() ? it.file.filename().u8string() : it.entryPath;
         std::vector<uint8_t> bytes;
         std::string e;
         pex::Script s;
         if (!ld.load(it, bytes, e) || pex::read(bytes.data(), bytes.size(), s, &e) != pex::Status::Ok) {
             out = "ERR|" + it.label + "|" + e + "\n";
+            outcome.file.reason = "unreadable";
+            outcome.file.detail = e;
             ++failures;
             return;
         }
         // Only a file we can write back byte-exactly is safe to edit.
         if (pex::rewrite_check(bytes.data(), bytes.size(), &e) != pex::Status::Ok) {
             out = "ERR|" + it.label + "|not byte-exact under rewrite: " + e + "\n";
+            outcome.file.reason = "not-byte-exact";
+            outcome.file.detail = e;
             ++failures;
             return;
         }
         const pex::PatchResult r = pex::apply_formid_map(s, map, extra);
+        outcome.file.edits = r.edits.size();
+        for (const pex::PatchEdit& ed : r.edits) {
+            char pair[32];
+            std::snprintf(pair, sizeof pair, "%08X->%08X", unsigned(ed.oldValue), unsigned(ed.newValue));
+            if (std::find(outcome.file.pairs.begin(), outcome.file.pairs.end(), pair) == outcome.file.pairs.end()) outcome.file.pairs.push_back(pair);
+        }
+        for (const pex::FormRef& sk : r.skipped) ++(sk.kind == pex::RefKind::Dynamic ? outcome.file.dynamic : outcome.file.notInMap);
         for (const pex::PatchEdit& ed : r.edits) {
             char buf[256];
             std::snprintf(buf, sizeof buf, "EDIT|%s|%s%s%s|%u|%s|%08X|%08X|%s\n", it.label.c_str(), ed.state.empty() ? "" : ed.state.c_str(),
@@ -1938,36 +2018,50 @@ int cmd_patch(int argc, char** argv) {
         for (const std::string& rn : r.renamedStrings) out += "RENAME|" + it.label + "|" + rn + "\n";
         if (r.edits.empty() && r.renamedStrings.empty()) {
             out += "UNCHANGED|" + it.label + "\n";
+            // It names the plugin, but nothing the pairs cover: worth a log line.
+            if (!r.skipped.empty()) {
+                outcome.file.reason = "no-edit";
+                outcome.file.detail = std::to_string(outcome.file.notInMap) + " not in map, " + std::to_string(outcome.file.dynamic) + " dynamic";
+            }
             return;
         }
-        if (!it.archive.empty()) {
+        if (!it.archive.empty() || r.renamedStrings.empty()) {
             // Planned here; written below, once the workers' readers are closed.
+            // A rename in a loose file changes its length: rewritten further down.
             pextool::MemberPatch member;
             std::string why;
-            if (!pextool::make_member_patch(it.label, it.entryPath, bytes, s, r, member, why)) {
+            if (!pextool::make_member_patch(it.label, it.entryPath, it.file, bytes, s, r, member, why)) {
                 out += "ERR|" + it.label + "|" + why + "\n";
+                outcome.file.reason = pextool::skip_reason_code(why);
+                outcome.file.detail = why;
                 ++failures;
                 return;
             }
             std::lock_guard<std::mutex> lk(mu);
-            planned[it.archive].push_back({i, std::move(member)});
+            if (it.archive.empty()) plannedLoose[it.file.parent_path()].push_back({i, std::move(member)});
+            else planned[it.archive].push_back({i, std::move(member)});
             return;
         }
         if (o.dryRun) {
+            outcome.patched = true;
             out += "DRYRUN|" + it.label + "|" + std::to_string(r.edits.size()) + " edits, " + std::to_string(r.renamedStrings.size()) + " renames\n";
             return;
         }
+        auto refuse = [&](const std::string& why) {
+            out += "ERR|" + it.label + "|" + why + "\n";
+            outcome.file.reason = "failed";
+            outcome.file.detail = why;
+            ++failures;
+        };
         std::vector<uint8_t> newBytes;
         if (pex::write(s, newBytes, &e) != pex::Status::Ok) {
-            out += "ERR|" + it.label + "|" + e + "\n";
-            ++failures;
+            refuse(e);
             return;
         }
         // Read back and check that every edit took.
         pex::Script check;
         if (pex::read(newBytes.data(), newBytes.size(), check, &e) != pex::Status::Ok) {
-            out += "ERR|" + it.label + "|rewritten file does not read back: " + e + "\n";
-            ++failures;
+            refuse("rewritten file does not read back: " + e);
             return;
         }
         std::error_code ec;
@@ -1975,30 +2069,73 @@ int cmd_patch(int argc, char** argv) {
         std::ofstream f(it.file, std::ios::binary | std::ios::trunc);
         f.write(reinterpret_cast<const char*>(newBytes.data()), static_cast<std::streamsize>(newBytes.size()));
         if (!f) {
-            out += "ERR|" + it.label + "|cannot write\n";
-            ++failures;
+            refuse("cannot write");
             return;
         }
         out += "PATCHED|" + it.label + "|" + std::to_string(r.edits.size()) + " edits, " + std::to_string(r.renamedStrings.size()) + " renames\n";
+        if (!o.backup) out += "NOTE|" + it.label + "|a rename is not journaled; --undo cannot restore it, --backup keeps a copy\n";
+        outcome.patched = true;
     });
-    // One archive at a time, in name order: the journal is per archive, and
-    // the write handle excludes other writers.
+    // One folder and one archive at a time, in name order: the journal is per
+    // container, and the write handle excludes other writers.
     pextool::ArchivePatchOptions apo;
     apo.dryRun = o.dryRun;
     apo.backup = o.backup;
-    apo.mapPath = o.map;
+    apo.mapPath = o.map.empty() ? std::string("--formid") : o.map;
     apo.extraCallees = extra;
-    for (auto& [archive, members] : planned) {
-        std::vector<pextool::MemberPatch*> ptrs;
-        std::sort(members.begin(), members.end(), [](const PlannedMember& a, const PlannedMember& b) { return a.row < b.row; });
-        for (PlannedMember& m : members) ptrs.push_back(&m.patch);
-        pextool::patch_archive_members(archive, ptrs, apo);
-        for (PlannedMember& m : members) {
-            rows[m.row] += m.patch.report;
-            if (m.patch.failed) ++failures;
+    std::map<fs::path, std::string> journals;  // container -> its journal, when something was written
+    auto apply = [&](std::map<fs::path, std::vector<PlannedMember>>& groups, bool loose) {
+        for (auto& [container, members] : groups) {
+            std::vector<pextool::MemberPatch*> ptrs;
+            std::sort(members.begin(), members.end(), [](const PlannedMember& a, const PlannedMember& b) { return a.row < b.row; });
+            for (PlannedMember& m : members) ptrs.push_back(&m.patch);
+            if (loose) pextool::patch_loose_members(container, ptrs, apo);
+            else pextool::patch_archive_members(container, ptrs, apo);
+            for (PlannedMember& m : members) {
+                rows[m.row] += m.patch.report;
+                Outcome& outcome = outcomes[m.row];
+                if (m.patch.failed) {
+                    ++failures;
+                    outcome.file.reason = pextool::skip_reason_code(m.patch.refusal);
+                    outcome.file.detail = m.patch.refusal;
+                } else {
+                    outcome.patched = true;
+                    if (!o.dryRun) journals[container] = (loose ? pextool::loose_journal_path(container) : pextool::journal_path(container)).u8string();
+                }
+            }
+        }
+    };
+    apply(plannedLoose, true);
+    apply(planned, false);
+    for (const std::string& r : rows) std::fputs(r.c_str(), stdout);
+
+    if (!logPath.empty()) {
+        std::map<std::pair<bool, fs::path>, pextool::LogContainer> containers;
+        for (size_t i = 0; i < items.size(); ++i) {
+            const bool inArchive = !items[i].archive.empty();
+            const fs::path where = inArchive ? items[i].archive : items[i].file.parent_path();
+            pextool::LogContainer& c = containers[{inArchive, where}];
+            c.archive = inArchive;
+            c.path = where.u8string();
+            ++c.scanned;
+            const auto journal = journals.find(where);
+            if (journal != journals.end()) c.journal = journal->second;
+            if (outcomes[i].patched) c.patched.push_back(outcomes[i].file);
+            else if (!outcomes[i].file.reason.empty()) c.skipped.push_back(outcomes[i].file);
+        }
+        std::vector<pextool::LogContainer> list;
+        for (auto& [key, c] : containers) list.push_back(std::move(c));
+        const std::string text = pextool::render_patch_log(logRun, std::move(list));
+        std::ofstream logFile(logPath, std::ios::binary | std::ios::trunc);
+        logFile.write(text.data(), static_cast<std::streamsize>(text.size()));
+        logFile.close();
+        if (!logFile) {
+            std::fprintf(stderr, "cannot write the log %s\n", logPath.u8string().c_str());
+            ++failures;
+        } else {
+            std::printf("LOG|%s\n", logPath.u8string().c_str());
         }
     }
-    for (const std::string& r : rows) std::fputs(r.c_str(), stdout);
     return failures ? 1 : 0;
 }
 
