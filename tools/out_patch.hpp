@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace pextool {
@@ -45,6 +46,42 @@ struct ArchivePlan {
 // ignored either way, so its archives do not load.
 bool plan_archives(const std::filesystem::path& data, const std::filesystem::path& pluginsTxt,
                    const std::vector<std::filesystem::path>& iniDirs, bool allPlugins, ArchivePlan& out, std::string& why);
+
+// The GOG version keeps its load order and INIs in folders of its own name.
+enum class GameStore { Steam, Gog };
+
+// %LOCALAPPDATA%\Skyrim Special Edition\plugins.txt, or Skyrim Special Edition
+// GOG for that version. Empty when %LOCALAPPDATA% is not set. Does not check it
+// exists: the game reads only its own, so another is never used in its place.
+std::filesystem::path default_plugins_txt(GameStore store = GameStore::Steam);
+
+// Documents\My Games\<the same folder name>. Empty when it cannot be found.
+std::filesystem::path game_ini_dir(GameStore store);
+
+// Decides on a Data folder from the install folders found: (where it was found,
+// install folder). One with no Data folder under it does not count, since a
+// record can outlive a moved install. Two different installs are refused rather
+// than guessed between. Empty with the reason when none can be chosen.
+std::filesystem::path choose_data_folder(const std::vector<std::pair<std::string, std::filesystem::path>>& installs, std::string& why);
+
+struct GameInstall {
+    std::filesystem::path data;
+    GameStore store = GameStore::Steam;
+};
+
+// Steam's records if they name an install, otherwise GOG's. An install of each
+// is refused rather than guessed between. False with the reason.
+bool pick_game(const std::vector<std::pair<std::string, std::filesystem::path>>& steam,
+               const std::vector<std::pair<std::string, std::filesystem::path>>& gog, GameInstall& out, std::string& why);
+
+// Looks in the registry. Steam: Bethesda's key, and Steam's entry for the app
+// named Skyrim Special Edition. GOG: its Bethesda key, and GOG's entry for the
+// game by name. False with the reason when it cannot settle on one Data folder.
+bool find_game(GameInstall& out, std::string& why);
+
+// Which version a Data folder given by hand belongs to: GOG if GOG's records name
+// it, otherwise Steam.
+GameStore store_of_data(const std::filesystem::path& data);
 
 enum class CopyKind { NotLoaded, Archive, Loose, Output };
 const char* to_string(CopyKind k) noexcept;

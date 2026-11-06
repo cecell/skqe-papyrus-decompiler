@@ -1167,6 +1167,72 @@ static void test_out(const fs::path& base) {
     CHECK(!plan_archives(root / "nowhere", plugins, {iniDir}, false, blocked, why));
 }
 
+// --- finding the game ---------------------------------------------------------------
+
+static void test_find_game(const fs::path& base) {
+    const fs::path a = base / "games" / "A", b = base / "games" / "B", none = base / "games" / "NoData";
+    fs::create_directories(a / "Data");
+    fs::create_directories(b / "Data");
+    fs::create_directories(none);
+    std::string why;
+    // Nothing recorded.
+    CHECK(choose_data_folder({}, why).empty());
+    CHECK(contains(why, "no record"));
+    // One record, and a record with no Data folder, which is not an install.
+    why.clear();
+    CHECK(choose_data_folder({{"Steam", a}}, why) == (a / "Data").lexically_normal());
+    CHECK(choose_data_folder({{"Bethesda", none}, {"Steam", a}}, why) == (a / "Data").lexically_normal());
+    CHECK(choose_data_folder({{"Bethesda", none}}, why).empty());
+    CHECK(contains(why, "no Data folder"));
+    // Two records of one install, however spelled, are one install.
+    fs::path upper = a;
+    {
+        std::string s = a.u8string();
+        for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        upper = fs::u8path(s);
+    }
+    CHECK(choose_data_folder({{"Bethesda", a}, {"Steam", upper}}, why) == (a / "Data").lexically_normal());
+    CHECK(choose_data_folder({{"Bethesda", fs::path(a) / ""}, {"Steam", a}}, why) == (a / "Data").lexically_normal());
+    // Two installs: not guessed between.
+    why.clear();
+    CHECK(choose_data_folder({{"Bethesda", a}, {"Steam", b}}, why).empty());
+    CHECK(contains(why, "two installs") && contains(why, "Bethesda") && contains(why, "Steam"));
+
+    // Steam if it has an install, otherwise GOG; an install of each is refused.
+    GameInstall g;
+    why.clear();
+    CHECK(pick_game({{"Steam", a}}, {}, g, why) && g.store == GameStore::Steam && g.data == (a / "Data").lexically_normal());
+    CHECK(pick_game({}, {{"GOG", b}}, g, why) && g.store == GameStore::Gog && g.data == (b / "Data").lexically_normal());
+    // A stale Steam record does not hide a real GOG install.
+    CHECK(pick_game({{"Steam", none}}, {{"GOG", b}}, g, why) && g.store == GameStore::Gog);
+    why.clear();
+    CHECK(!pick_game({{"Steam", a}}, {{"GOG", b}}, g, why));
+    CHECK(contains(why, "both are installed"));
+    why.clear();
+    CHECK(!pick_game({}, {}, g, why));
+    CHECK(contains(why, "from Steam") && contains(why, "from GOG"));
+    why.clear();
+    CHECK(!pick_game({{"Bethesda", a}, {"Steam", b}}, {}, g, why));
+    CHECK(contains(why, "two installs"));
+
+    // GOG's folders have a name of their own.
+    CHECK(contains(game_ini_dir(GameStore::Gog).u8string(), "Skyrim Special Edition GOG"));
+    CHECK(!contains(game_ini_dir(GameStore::Steam).u8string(), " GOG"));
+
+#ifdef _WIN32
+    // plugins.txt comes from %LOCALAPPDATA%, whatever that is, and if it is not
+    // set there is no default to fall back on.
+    const wchar_t* was = _wgetenv(L"LOCALAPPDATA");
+    const std::wstring saved = was ? was : L"";
+    _wputenv_s(L"LOCALAPPDATA", L"C:\\Somewhere");
+    CHECK(default_plugins_txt() == fs::path(L"C:\\Somewhere\\Skyrim Special Edition\\plugins.txt"));
+    CHECK(default_plugins_txt(GameStore::Gog) == fs::path(L"C:\\Somewhere\\Skyrim Special Edition GOG\\plugins.txt"));
+    _wputenv_s(L"LOCALAPPDATA", L"");
+    CHECK(default_plugins_txt().empty());
+    _wputenv_s(L"LOCALAPPDATA", saved.c_str());
+#endif
+}
+
 // --- FormID pairs ---------------------------------------------------------------
 
 static void test_pairs(const fs::path& dir) {
@@ -1301,6 +1367,7 @@ int main(int, char** argv) {
     test_loose(dir);
     test_extract(dir);
     test_out(dir);
+    test_find_game(dir);
     test_game_check(argv[0]);
     test_pairs(dir);
     test_log();

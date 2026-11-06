@@ -155,10 +155,15 @@ commands
                                archive and folder; --formid writes one by default
                                next to the input, unless --dry-run
                                (docs/INTEGRATION.md)
-  patch <Data> --out <folder> --load-order <plugins.txt> [--all-plugins]
-            [--ini-dir <dir>] (--plugin Name.esp --formid OLD:NEW ... | --map <FormIDMap>)
+  patch --out <folder> --plugin Name.esp --formid OLD:NEW [--formid ...]
+            [<Data>] [--load-order <plugins.txt>] [--all-plugins] [--ini-dir <dir>]
+            [--map <FormIDMap> instead of --plugin and --formid]
             [--log <file>] [--callee Name,...] [--dry-run]
-                               changes nothing in Data. For each script the game
+                               docs/ESLIFY_PRIMER.md. The game is found through
+                               the registry, Steam's install, else GOG's, and
+                               plugins.txt in %LOCALAPPDATA%\Skyrim Special Edition,
+                               or that name plus GOG; if either cannot be found it
+                               refuses and says why. Changes nothing in Data. For each script the game
                                would load, the one winning copy gets the changes
                                and is written to <folder>\scripts\, to package
                                and install as a mod. A copy already in <folder>
@@ -171,7 +176,7 @@ commands
                                pairs changes nothing. The log goes beside
                                <folder> and lists the losing copies. Refuses
                                while the game runs, with no override
-  winners <Data> --load-order <plugins.txt> [--all-plugins] [--ini-dir <dir>]
+  winners [<Data>] [--load-order <plugins.txt>] [--all-plugins] [--ini-dir <dir>]
                                lists the copy of each script the game loads,
                                as CSV: script, kind, source
   patch --undo <journal> [--dry-run]
@@ -1910,6 +1915,56 @@ int cmd_closure(int argc, char** argv) {
     return rc;
 }
 
+// Fills in the Data folder and plugins.txt when not given. False, having said
+// why, when either cannot be found: which copy of a script wins depends on them,
+// so nothing goes ahead on a guess.
+bool resolve_game_paths(Options& o) {
+    std::error_code ec;
+    if (o.inputs.size() > 1) {
+        std::fprintf(stderr, "only one input is taken here: the game's Data folder\n");
+        return false;
+    }
+    pextool::GameStore store = pextool::GameStore::Steam;
+    if (o.inputs.empty()) {
+        std::string why;
+        pextool::GameInstall game;
+        if (!pextool::find_game(game, why)) {
+            std::fprintf(stderr, "Cannot find the game's Data folder: %s.\nNothing was done. Give the folder as the first argument.\n", why.c_str());
+            return false;
+        }
+        store = game.store;
+        o.inputs.push_back(game.data.u8string());
+    } else if (!fs::is_directory(fs::u8path(o.inputs[0]), ec)) {
+        std::fprintf(stderr, "%s is not a folder; this needs the game's Data folder. Nothing was done.\n", o.inputs[0].c_str());
+        return false;
+    } else {
+        store = pextool::store_of_data(fs::u8path(o.inputs[0]));
+    }
+    const bool gog = store == pextool::GameStore::Gog;
+    if (gog) {
+        const fs::path iniDir = pextool::game_ini_dir(store);
+        if (!iniDir.empty()) o.iniDirs.push_back(iniDir.u8string());
+    }
+    if (!o.loadOrder.empty()) {
+        if (!fs::is_regular_file(fs::u8path(o.loadOrder), ec)) {
+            std::fprintf(stderr, "Cannot find the load order given with --load-order: %s.\nNothing was done.\n", o.loadOrder.c_str());
+            return false;
+        }
+        return true;
+    }
+    const fs::path plugins = pextool::default_plugins_txt(store);
+    if (plugins.empty() || !fs::is_regular_file(plugins, ec)) {
+        std::fprintf(stderr,
+                     "Cannot find plugins.txt at %s, where the %s version of Skyrim SE/AE keeps it.\n"
+                     "Nothing was done: the load order decides which copy of a script wins, and it will not guess.\n"
+                     "Has the game been run on this account? If plugins.txt is somewhere else, give it with --load-order <file>.\n",
+                     plugins.empty() ? "%LOCALAPPDATA% (LOCALAPPDATA is not set)" : plugins.u8string().c_str(), gog ? "GOG" : "Steam");
+        return false;
+    }
+    o.loadOrder = plugins.u8string();
+    return true;
+}
+
 int cmd_patch(int argc, char** argv) {
     Options o;
     if (!parse(argc, argv, 2, o, "patch")) return 2;
@@ -1943,15 +1998,7 @@ int cmd_patch(int argc, char** argv) {
     const bool toOutput = !o.out.empty();
     if (toOutput) {
         // One game folder, and nothing in it is written to.
-        std::error_code folderEc;
-        if (o.inputs.size() != 1 || !fs::is_directory(fs::u8path(o.inputs[0]), folderEc)) {
-            std::fprintf(stderr, "patch --out takes one input: the game's Data folder\n");
-            return 2;
-        }
-        if (o.loadOrder.empty()) {
-            std::fprintf(stderr, "patch --out needs --load-order <plugins.txt>: it decides which copy of a script wins\n");
-            return 2;
-        }
+        if (!resolve_game_paths(o)) return 2;
         if (o.backup) {
             std::fprintf(stderr, "patch --out changes nothing that could need a backup; remove --backup\n");
             return 2;
@@ -2400,11 +2447,7 @@ int cmd_patch(int argc, char** argv) {
 int cmd_winners(int argc, char** argv) {
     Options o;
     if (!parse(argc, argv, 2, o, "winners")) return 2;
-    std::error_code ec;
-    if (o.inputs.size() != 1 || !fs::is_directory(fs::u8path(o.inputs[0]), ec) || o.loadOrder.empty()) {
-        std::fprintf(stderr, "winners takes the game's Data folder and --load-order <plugins.txt>\n");
-        return 2;
-    }
+    if (!resolve_game_paths(o)) return 2;
     std::vector<fs::path> iniDirs;
     for (const std::string& d : o.iniDirs) iniDirs.push_back(fs::u8path(d));
     std::string csv, why;

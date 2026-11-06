@@ -28,6 +28,7 @@
 #include <shlobj.h>
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "advapi32.lib")
 #endif
 
 namespace pextool {
@@ -297,6 +298,158 @@ fs::path output_state_path(const fs::path& outFolder) {
     p = p.lexically_normal();
     if (!p.has_filename()) p = p.parent_path();
     return fs::path(p).concat(".pexpatch.state");
+}
+
+// --- finding the game --------------------------------------------------------------
+
+namespace {
+
+const char* game_folder_name(GameStore store) { return store == GameStore::Gog ? "Skyrim Special Edition GOG" : "Skyrim Special Edition"; }
+
+}  // namespace
+
+fs::path default_plugins_txt(GameStore store) {
+#ifdef _WIN32
+    const wchar_t* local = _wgetenv(L"LOCALAPPDATA");
+    if (!local || !*local) return fs::path();
+    return fs::path(local) / game_folder_name(store) / "plugins.txt";
+#else
+    (void)store;
+    return fs::path();
+#endif
+}
+
+fs::path game_ini_dir(GameStore store) {
+    fs::path out;
+#ifdef _WIN32
+    PWSTR documents = nullptr;
+    if (SHGetKnownFolderPath(FOLDERID_Documents, 0, nullptr, &documents) == S_OK) out = fs::path(documents) / "My Games" / game_folder_name(store);
+    CoTaskMemFree(documents);
+#else
+    (void)store;
+#endif
+    return out;
+}
+
+fs::path choose_data_folder(const std::vector<std::pair<std::string, fs::path>>& installs, std::string& why) {
+    std::vector<std::pair<std::string, fs::path>> found;
+    std::string looked;
+    for (const auto& [where, install] : installs) {
+        looked += (looked.empty() ? "" : "; ") + where + ": " + install.u8string();
+        std::error_code ec;
+        const fs::path data = (install / "Data").lexically_normal();
+        if (fs::is_directory(data, ec)) found.emplace_back(where, data);
+    }
+    if (found.empty()) {
+        why = looked.empty() ? "the registry has no record of it" : "the registry names an install with no Data folder (" + looked + ")";
+        return fs::path();
+    }
+    for (const auto& f : found) {
+        if (lower(f.second.u8string()) != lower(found[0].second.u8string())) {
+            why = "the registry names two installs: " + found[0].first + " has " + found[0].second.u8string() + ", " + f.first + " has " + f.second.u8string();
+            return fs::path();
+        }
+    }
+    return found[0].second;
+}
+
+bool pick_game(const std::vector<std::pair<std::string, fs::path>>& steam, const std::vector<std::pair<std::string, fs::path>>& gog, GameInstall& out,
+               std::string& why) {
+    std::string steamWhy, gogWhy;
+    const fs::path s = choose_data_folder(steam, steamWhy);
+    const fs::path g = choose_data_folder(gog, gogWhy);
+    for (const std::string* w : {&steamWhy, &gogWhy}) {
+        if (w->find("two installs") != std::string::npos) {
+            why = *w;
+            return false;
+        }
+    }
+    if (!s.empty() && !g.empty() && lower(s.u8string()) != lower(g.u8string())) {
+        why = "both are installed, Steam at " + s.u8string() + " and GOG at " + g.u8string();
+        return false;
+    }
+    if (!s.empty()) {
+        out = {s, GameStore::Steam};
+        return true;
+    }
+    if (!g.empty()) {
+        out = {g, GameStore::Gog};
+        return true;
+    }
+    why = "looked for Skyrim Special Edition from Steam (" + steamWhy + ") and from GOG (" + gogWhy + ")";
+    return false;
+}
+
+namespace {
+
+using InstallList = std::vector<std::pair<std::string, fs::path>>;
+
+#ifdef _WIN32
+bool registry_text(HKEY root, const wchar_t* key, const wchar_t* name, DWORD view, std::wstring& out) {
+    wchar_t buf[2048];
+    DWORD size = sizeof buf;
+    if (RegGetValueW(root, key, name, RRF_RT_REG_SZ | view, nullptr, buf, &size) != ERROR_SUCCESS) return false;
+    out = buf;
+    return !out.empty();
+}
+#endif
+
+void read_game_records(InstallList& steam, InstallList& gog) {
+#ifdef _WIN32
+    std::wstring path, name;
+    if (registry_text(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Bethesda Softworks\\Skyrim Special Edition", L"Installed Path", RRF_SUBKEY_WOW6432KEY, path)) {
+        steam.emplace_back("Bethesda's registry key", fs::path(path));
+    }
+    // Steam's entry for the app, by its app ID; the name is checked so that an
+    // entry for something else is not taken for the game.
+    const wchar_t* const steamKey = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Steam App 489830";
+    if (registry_text(HKEY_LOCAL_MACHINE, steamKey, L"DisplayName", RRF_SUBKEY_WOW6464KEY, name) && name.find(L"Skyrim Special Edition") != std::wstring::npos &&
+        registry_text(HKEY_LOCAL_MACHINE, steamKey, L"InstallLocation", RRF_SUBKEY_WOW6464KEY, path)) {
+        steam.emplace_back("Steam's app entry", fs::path(path));
+    }
+
+    if (registry_text(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Bethesda Softworks\\Skyrim Special Edition GOG", L"Installed Path", RRF_SUBKEY_WOW6432KEY, path)) {
+        gog.emplace_back("Bethesda's GOG registry key", fs::path(path));
+    }
+    // GOG lists each game under its product ID; it is found by name, because the
+    // Special and Anniversary editions have IDs of their own.
+    HKEY games = nullptr;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\GOG.com\\Games", 0, KEY_READ | KEY_WOW64_32KEY, &games) == ERROR_SUCCESS) {
+        for (DWORD i = 0;; ++i) {
+            wchar_t id[256];
+            DWORD idSize = 256;
+            if (RegEnumKeyExW(games, i, id, &idSize, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS) break;
+            if (!registry_text(games, id, L"gameName", 0, name) || name.find(L"Skyrim") == std::wstring::npos) continue;
+            if (name.find(L"Special Edition") == std::wstring::npos && name.find(L"Anniversary") == std::wstring::npos) continue;
+            if (registry_text(games, id, L"path", 0, path)) gog.emplace_back("GOG's game entry", fs::path(path));
+        }
+        RegCloseKey(games);
+    }
+#else
+    (void)steam;
+    (void)gog;
+#endif
+}
+
+}  // namespace
+
+bool find_game(GameInstall& out, std::string& why) {
+    InstallList steam, gog;
+    read_game_records(steam, gog);
+    return pick_game(steam, gog, out, why);
+}
+
+GameStore store_of_data(const fs::path& data) {
+    InstallList steam, gog;
+    read_game_records(steam, gog);
+    std::error_code ec;
+    const fs::path a = fs::absolute(data, ec);
+    std::string given = lower((ec ? data : a).lexically_normal().u8string());
+    while (!given.empty() && (given.back() == '\\' || given.back() == '/')) given.pop_back();
+    for (const auto& [where, install] : gog) {
+        if (lower((install / "Data").lexically_normal().u8string()) == given) return GameStore::Gog;
+    }
+    return GameStore::Steam;
 }
 
 // --- the load order ---------------------------------------------------------------
