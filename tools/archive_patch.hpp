@@ -52,6 +52,8 @@ struct MemberPatch {
     std::vector<uint8_t> oldBytes, newBytes;
     std::vector<OperandRange> ranges;
     std::vector<papyrus::pex::PatchEdit> edits;
+    // A compressed member: the loose file it becomes (see extract_members).
+    std::filesystem::path extractTo;
     // Filled when it is applied: the report lines and the outcome.
     std::string report;
     bool failed = false;
@@ -93,11 +95,54 @@ std::filesystem::path loose_journal_path(const std::filesystem::path& folder);
 void patch_loose_members(const std::filesystem::path& folder, std::vector<MemberPatch*> members,
                          const ArchivePatchOptions& options);
 
+// --- compressed members become loose files ---------------------------------------
+
+// Which of the members are stored compressed, one flag per member. False when
+// the archive cannot be opened; patch_archive_members reports that.
+bool find_compressed_members(const std::filesystem::path& archive, const std::vector<MemberPatch*>& members,
+                             std::vector<char>& compressed);
+
+// Where a member's loose file goes: Scripts\<the rest of its path> in the
+// archive's folder, the place the game looks for it. False when the member is
+// not under scripts\: the game would not load it as a script from anywhere.
+bool extract_target(const std::filesystem::path& archive, const std::string& entryPath, std::filesystem::path& out);
+
+// One member about to become a loose file.
+struct ExtractCandidate {
+    std::filesystem::path archive;
+    MemberPatch* member = nullptr;
+    std::string conflict;  // filled by find_other_copies: the archive with different bytes
+};
+
+// A loose file beats every archive, so extracting one copy of a script would
+// also beat another archive's copy that load order may have been choosing. Looks
+// in every .bsa in each candidate's folder for the same path and records the
+// first copy with different bytes. Identical copies are fine.
+void find_other_copies(std::vector<ExtractCandidate>& candidates);
+
+// Writes each member's patched bytes to its extractTo, journaled in the archive's
+// journal first, written through a temporary name so no partial script is ever
+// loadable, then read back. A file that does not verify is removed. Sets each
+// member's report and failed. The archive itself is not touched.
+void extract_members(const std::filesystem::path& archive, std::vector<MemberPatch*> members, const ArchivePatchOptions& options);
+
 // Restores every byte the journal's ranges not yet undone changed, in every
-// archive or loose file it names. The bytes found must be values the journal
-// says they held; on any mismatch in a file nothing in that file is written.
-// Appends the report lines to `report`. Returns the number of failures.
+// archive or loose file it names, and deletes the files it extracted. The bytes
+// found must be values the journal says they held; on any mismatch in a file
+// nothing in that file is written, and an extracted file that has changed since
+// is left in place. Appends the report lines to `report`. Returns the number of
+// failures.
 int undo_journal(const std::filesystem::path& journal, bool dryRun, std::string& report);
+
+// --- the game must not be running --------------------------------------------
+
+// False, with the reason, when a Skyrim or SKSE loader process is running, or
+// when that cannot be established: an unverified check counts as running.
+bool verify_game_not_running(std::string& why);
+
+// The running processes with one of these names (any case). False when the
+// process list cannot be read.
+bool find_running_processes(const std::vector<std::string>& names, std::vector<std::string>& found, std::string& why);
 
 // --- FormID pairs on the command line -----------------------------------------
 
@@ -116,7 +161,7 @@ bool add_formid_pairs_file(const std::filesystem::path& file, papyrus::pex::Form
 // --- the log ------------------------------------------------------------------
 
 // The stable code of a refusal, from its text: compressed, shared-block,
-// plugin-rename, not-byte-exact, or failed.
+// plugin-rename, not-byte-exact, other-copy, or failed.
 std::string skip_reason_code(const std::string& why);
 
 struct LogFile {
@@ -125,6 +170,7 @@ struct LogFile {
     std::vector<std::string> pairs;  // "0100ABCD->0100ABCE", distinct, in file order
     size_t notInMap = 0, dynamic = 0;  // references to the plugin left as they are
     std::string reason, detail;  // for a skipped file: its code and text
+    std::string extractedTo;     // for an extracted member: the loose file
 };
 
 struct LogContainer {
@@ -132,7 +178,7 @@ struct LogContainer {
     std::string path;
     std::string journal;  // empty when nothing was written
     size_t scanned = 0;
-    std::vector<LogFile> patched, skipped;
+    std::vector<LogFile> patched, extracted, skipped;
 };
 
 struct LogRun {

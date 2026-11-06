@@ -142,18 +142,24 @@ commands
                                changing: 4 bytes per literal are overwritten,
                                journaled first (<archive>.pexpatch.journal,
                                <folder>\pexpatch.journal), read back, rolled
-                               back if that fails. An archive member is refused,
-                               with the reason, for a rename, compression or a
-                               data block shared with another member. --backup
+                               back if that fails. A compressed member is
+                               extracted, patched, to Scripts\ beside its archive;
+                               a loose copy already there is patched instead and
+                               the archive left alone; a different copy in another
+                               archive there refuses it. An archive member is also
+                               refused, with the reason, for a rename or a data
+                               block shared with another member. Refuses to write
+                               while the game runs, with no override. --backup
                                copies loose files only. --log writes a report by
                                archive and folder; --formid writes one by default
                                next to the input, unless --dry-run
                                (docs/INTEGRATION.md)
   patch --undo <journal> [--dry-run]
                                restores every byte the journal's patches
-                               changed; refuses if a file holds anything the
-                               journal does not account for; run once per
-                               JOURNAL line of the patch
+                               changed and deletes the files they extracted;
+                               refuses if a file holds anything the journal does
+                               not account for, or while the game runs; run once
+                               per JOURNAL line of the patch
   check --rewrite <input>      read + write every script, compare byte for byte
   check --asm <input> --tools <dir>
                                assemble our listing with PapyrusAssembler.exe
@@ -1886,6 +1892,14 @@ int cmd_patch(int argc, char** argv) {
             std::fprintf(stderr, "patch --undo takes the journal alone\n");
             return 2;
         }
+        std::string gameWhy;
+        if (!pextool::verify_game_not_running(gameWhy)) {
+            if (!o.dryRun) {
+                std::printf("ERR|game|%s; nothing restored\n", gameWhy.c_str());
+                return 1;
+            }
+            std::printf("NOTE|game|%s; a real undo would be refused\n", gameWhy.c_str());
+        }
         std::string report;
         const int undoFailures = pextool::undo_journal(fs::u8path(o.undo), o.dryRun, report);
         std::fputs(report.c_str(), stdout);
@@ -1933,6 +1947,18 @@ int cmd_patch(int argc, char** argv) {
             return 2;
         }
     }
+    // Nothing is written while the game runs. There is deliberately no way to
+    // override this; a check that cannot run counts as the game running.
+    {
+        std::string gameWhy;
+        if (!pextool::verify_game_not_running(gameWhy)) {
+            if (!o.dryRun) {
+                std::printf("ERR|game|%s; nothing changed\n", gameWhy.c_str());
+                return 1;
+            }
+            std::printf("NOTE|game|%s; a real run would be refused\n", gameWhy.c_str());
+        }
+    }
     // The log: asked for, or by default for a real --formid run. A dry run
     // without --log writes nothing at all, wherever its input is. The file is
     // created first, so nothing is patched without somewhere to report it.
@@ -1971,7 +1997,7 @@ int cmd_patch(int argc, char** argv) {
         bool patched = false;
     };
     std::vector<Outcome> outcomes(items.size());
-    pextool::for_each_parallel(items, o.threads, [&](size_t i, const pextool::Item& it, pextool::Loader& ld) {
+    auto processOne = [&](size_t i, const pextool::Item& it, pextool::Loader& ld) {
         std::string& out = rows[i];
         Outcome& outcome = outcomes[i];
         outcome.file.name = it.archive.empty() ? it.file.filename().u8string() : it.entryPath;
@@ -2075,7 +2101,128 @@ int cmd_patch(int argc, char** argv) {
         out += "PATCHED|" + it.label + "|" + std::to_string(r.edits.size()) + " edits, " + std::to_string(r.renamedStrings.size()) + " renames\n";
         if (!o.backup) out += "NOTE|" + it.label + "|a rename is not journaled; --undo cannot restore it, --backup keeps a copy\n";
         outcome.patched = true;
-    });
+    };
+    pextool::for_each_parallel(items, o.threads, processOne);
+
+    // The scan can take seconds: look again before the archives and journaled
+    // loose files are written.
+    {
+        std::string gameWhy;
+        if (!o.dryRun && !pextool::verify_game_not_running(gameWhy)) {
+            for (const std::string& r : rows) std::fputs(r.c_str(), stdout);
+            std::printf("ERR|game|%s; no archive or journaled file was written\n", gameWhy.c_str());
+            if (!logPath.empty()) {
+                std::error_code removeEc;
+                fs::remove(logPath, removeEc);  // still empty, created above
+            }
+            return 1;
+        }
+    }
+
+    // A compressed member cannot be overwritten in place, so its patched bytes
+    // become the loose file the game prefers: Scripts\ beside the archive. A
+    // loose copy already there is what the game uses, so that gets patched
+    // instead, and is never overwritten.
+    auto pathKey = [](const fs::path& p) {
+        std::error_code keyEc;
+        const fs::path a = fs::absolute(p, keyEc);
+        std::string key = (keyEc ? p : a).lexically_normal().u8string();
+        std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+        return key;
+    };
+    std::set<std::string> looseInRun;
+    for (const pextool::Item& it : items) {
+        if (it.archive.empty()) looseInRun.insert(pathKey(it.file));
+    }
+    std::vector<fs::path> overridersToPatch;
+    std::vector<pextool::ExtractCandidate> candidates;
+    std::map<const pextool::MemberPatch*, size_t> leaveArchive;  // member -> its row, handled here rather than in place
+    std::map<const pextool::MemberPatch*, size_t> rowOfMember;
+    for (auto& [archive, members] : planned) {
+        std::vector<pextool::MemberPatch*> ptrs;
+        for (PlannedMember& m : members) {
+            ptrs.push_back(&m.patch);
+            rowOfMember[&m.patch] = m.row;
+        }
+        std::vector<char> compressed;
+        if (!pextool::find_compressed_members(archive, ptrs, compressed)) continue;  // patch_archive_members reports it
+        for (size_t k = 0; k < members.size(); ++k) {
+            PlannedMember& m = members[k];
+            fs::path target;
+            std::error_code existsEc;
+            if (!pextool::extract_target(archive, m.patch.entryPath, target)) continue;  // refused in place, if compressed
+            const bool inRun = looseInRun.count(pathKey(target)) != 0;
+            const bool overridden = inRun || fs::exists(target, existsEc);
+            if (!compressed[k]) {
+                if (overridden) rows[m.row] += "NOTE|" + m.patch.label + "|a loose copy overrides this member in game: " + target.u8string() + "\n";
+                continue;
+            }
+            if (overridden) {
+                rows[m.row] += "NOTE|" + m.patch.label + "|a loose copy overrides this member in game, patched instead, archive untouched: " + target.u8string() + "\n";
+                outcomes[m.row].file.reason = "overridden";
+                outcomes[m.row].file.detail = "a loose copy overrides it: " + target.u8string();
+                leaveArchive[&m.patch] = m.row;
+                if (!inRun) {
+                    looseInRun.insert(pathKey(target));
+                    overridersToPatch.push_back(target);
+                }
+                continue;
+            }
+            m.patch.extractTo = target;
+            candidates.push_back({archive, &m.patch, std::string()});
+        }
+    }
+    pextool::find_other_copies(candidates);
+    std::map<std::string, std::string> targetsTaken;
+    std::set<const pextool::MemberPatch*> willExtract;
+    for (const pextool::ExtractCandidate& c : candidates) {
+        const size_t row = rowOfMember[c.member];
+        leaveArchive[c.member] = row;
+        if (!c.conflict.empty()) {
+            const std::string why = "stored compressed, and there is a different copy in " + c.conflict +
+                                    ": a loose file would override both, and which one the game loads now depends on load order; nothing written";
+            rows[row] += "ERR|" + c.member->label + "|" + why + "\n";
+            outcomes[row].file.reason = "other-copy";
+            outcomes[row].file.detail = why;
+            ++failures;
+            continue;
+        }
+        const auto taken = targetsTaken.find(pathKey(c.member->extractTo));
+        if (taken != targetsTaken.end()) {
+            const std::string why = "an identical copy is extracted from " + taken->second;
+            rows[row] += "NOTE|" + c.member->label + "|" + why + "\n";
+            outcomes[row].file.reason = "overridden";
+            outcomes[row].file.detail = why;
+            continue;
+        }
+        targetsTaken[pathKey(c.member->extractTo)] = c.member->label;
+        willExtract.insert(c.member);
+    }
+    std::map<fs::path, std::vector<PlannedMember>> toExtract;
+    for (auto& [archive, members] : planned) {
+        std::vector<PlannedMember> keep;
+        for (PlannedMember& m : members) {
+            const bool extract = willExtract.count(&m.patch) != 0;
+            const bool leaves = leaveArchive.count(&m.patch) != 0;
+            if (extract) toExtract[archive].push_back(std::move(m));
+            else if (!leaves) keep.push_back(std::move(m));
+        }
+        members = std::move(keep);
+    }
+    // A loose copy the inputs did not name goes through the same steps as any
+    // loose script, and gets its own lines and its own place in the log.
+    for (const fs::path& file : overridersToPatch) {
+        pextool::Item extraItem;
+        extraItem.file = file;
+        extraItem.name = file.filename().u8string();
+        extraItem.label = file.u8string();
+        items.push_back(std::move(extraItem));
+        rows.emplace_back();
+        outcomes.emplace_back();
+        pextool::Loader looseLoader;
+        processOne(items.size() - 1, items.back(), looseLoader);
+    }
+
     // One folder and one archive at a time, in name order: the journal is per
     // container, and the write handle excludes other writers.
     pextool::ArchivePatchOptions apo;
@@ -2106,6 +2253,23 @@ int cmd_patch(int argc, char** argv) {
         }
     };
     apply(plannedLoose, true);
+    for (auto& [archive, members] : toExtract) {
+        std::vector<pextool::MemberPatch*> ptrs;
+        for (PlannedMember& m : members) ptrs.push_back(&m.patch);
+        pextool::extract_members(archive, ptrs, apo);
+        for (PlannedMember& m : members) {
+            rows[m.row] += m.patch.report;
+            Outcome& outcome = outcomes[m.row];
+            if (m.patch.failed) {
+                ++failures;
+                outcome.file.reason = pextool::skip_reason_code(m.patch.refusal);
+                outcome.file.detail = m.patch.refusal;
+            } else {
+                outcome.file.extractedTo = m.patch.extractTo.u8string();
+                if (!o.dryRun) journals[archive] = pextool::journal_path(archive).u8string();
+            }
+        }
+    }
     apply(planned, false);
     for (const std::string& r : rows) std::fputs(r.c_str(), stdout);
 
@@ -2120,7 +2284,8 @@ int cmd_patch(int argc, char** argv) {
             ++c.scanned;
             const auto journal = journals.find(where);
             if (journal != journals.end()) c.journal = journal->second;
-            if (outcomes[i].patched) c.patched.push_back(outcomes[i].file);
+            if (!outcomes[i].file.extractedTo.empty()) c.extracted.push_back(outcomes[i].file);
+            else if (outcomes[i].patched) c.patched.push_back(outcomes[i].file);
             else if (!outcomes[i].file.reason.empty()) c.skipped.push_back(outcomes[i].file);
         }
         std::vector<pextool::LogContainer> list;

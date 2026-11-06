@@ -145,13 +145,17 @@ pex patch <input> --map <FormIDMap> [--log <file>] [--dry-run] [--backup]
                                  scans a file, folder or archive and renumbers
                                  FormID literals, loose and inside archives: 4
                                  bytes per literal overwritten in place, journaled,
-                                 read back; an archive member that is compressed,
-                                 shares its data block or would be renamed is
-                                 refused; a log by archive and folder;
+                                 read back; a compressed member is extracted,
+                                 patched, to Scripts\ beside its archive; refused
+                                 if another archive there has a different copy, or
+                                 for a shared data block or a rename in an archive;
+                                 a log by archive and folder. Refuses to write
+                                 while the game runs, with no override;
                                  docs/INTEGRATION.md
 pex patch --undo <journal> [--dry-run]
-                                 restores every byte a journal's patches changed;
-                                 a run writes one journal per archive and folder
+                                 restores every byte a journal's patches changed
+                                 and deletes what they extracted; a run writes one
+                                 journal per archive and folder
 pex check --rewrite <input>      read + write, compare byte for byte
 pex check --asm <input> --tools "<game>\Papyrus Compiler"
 pex check --assemble <input> [--tools "<game>\Papyrus Compiler"]

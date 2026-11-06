@@ -24,6 +24,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <tlhelp32.h>
 #else
 #include <cerrno>
 #include <fcntl.h>
@@ -412,8 +413,10 @@ void member_error(MemberPatch& m, const std::string& why) {
 // --- the journal -------------------------------------------------------------
 
 constexpr const char* kJournalHeader =
-    "# pex patch journal v1; undo with: pex patch --undo <this file>\n"
+    "# pex patch journal v2; undo with: pex patch --undo <this file>\n"
     "# RANGE|seq|archive|member|absolute offset|old hex|new hex|map|UTC time\n"
+    "# EXTRACTED|seq|file|archive|member|size|FNV-1a 64 hex|map|UTC time\n"
+    "# MKDIR|seq|folder|UTC time\n"
     "# UNDONE|seq|UTC time\n";
 
 struct JournalRange {
@@ -423,8 +426,22 @@ struct JournalRange {
     std::vector<uint8_t> oldBytes, newBytes;
 };
 
+struct JournalExtract {
+    uint64_t seq = 0;
+    std::string file, archive, member;
+    uint64_t size = 0;
+    std::string hash;
+};
+
+struct JournalFolder {
+    uint64_t seq = 0;
+    std::string folder;
+};
+
 struct JournalText {
     std::vector<JournalRange> ranges;  // in file order, undone ones removed
+    std::vector<JournalExtract> extracts;
+    std::vector<JournalFolder> folders;
     uint64_t lastSeq = 0;
     bool torn = false;                 // the last line has no line break
     uint64_t goodLength = 0;           // bytes up to and including the last complete line
@@ -455,6 +472,8 @@ bool parse_range(const std::vector<std::string_view>& f, JournalRange& r) {
 // never acted on. Any other unreadable line is a damaged journal: undo refuses.
 bool parse_journal(const std::string& text, JournalText& out, std::string& why) {
     std::vector<JournalRange> all;
+    std::vector<JournalExtract> allExtracts;
+    std::vector<JournalFolder> allFolders;
     std::set<uint64_t> undone;
     size_t pos = 0;
     size_t lineNo = 0;
@@ -478,6 +497,22 @@ bool parse_journal(const std::string& text, JournalText& out, std::string& why) 
             all.push_back(std::move(r));
         } else if (f.size() == 3 && f[0] == "UNDONE" && parse_u64(f[1], seq)) {
             undone.insert(seq);
+        } else if (f.size() == 9 && f[0] == "EXTRACTED" && parse_u64(f[1], seq) && !f[2].empty()) {
+            JournalExtract x;
+            x.seq = seq;
+            x.file = std::string(f[2]);
+            x.archive = std::string(f[3]);
+            x.member = std::string(f[4]);
+            x.hash = std::string(f[6]);
+            if (!parse_u64(f[5], x.size)) {
+                why = "journal line " + std::to_string(lineNo) + " cannot be read";
+                return false;
+            }
+            out.lastSeq = std::max(out.lastSeq, seq);
+            allExtracts.push_back(std::move(x));
+        } else if (f.size() == 4 && f[0] == "MKDIR" && parse_u64(f[1], seq) && !f[2].empty()) {
+            out.lastSeq = std::max(out.lastSeq, seq);
+            allFolders.push_back({seq, std::string(f[2])});
         } else {
             why = "journal line " + std::to_string(lineNo) + " cannot be read";
             return false;
@@ -486,7 +521,25 @@ bool parse_journal(const std::string& text, JournalText& out, std::string& why) 
     for (JournalRange& r : all) {
         if (!undone.count(r.seq)) out.ranges.push_back(std::move(r));
     }
+    for (JournalExtract& x : allExtracts) {
+        if (!undone.count(x.seq)) out.extracts.push_back(std::move(x));
+    }
+    for (JournalFolder& d : allFolders) {
+        if (!undone.count(d.seq)) out.folders.push_back(std::move(d));
+    }
     return true;
+}
+
+// Identifies a file the journal extracted: an undo deletes only that file.
+std::string fnv1a64_hex(const std::vector<uint8_t>& bytes) {
+    uint64_t h = 0xCBF29CE484222325ull;
+    for (uint8_t b : bytes) {
+        h ^= b;
+        h *= 0x100000001B3ull;
+    }
+    char buf[20];
+    std::snprintf(buf, sizeof buf, "%016llX", static_cast<unsigned long long>(h));
+    return buf;
 }
 
 bool read_whole(const fs::path& p, std::string& out) {
@@ -991,6 +1044,219 @@ void patch_loose_members(const fs::path& folder, std::vector<MemberPatch*> membe
     members.back()->report += folderLines;
 }
 
+// --- compressed members ---------------------------------------------------------
+
+bool find_compressed_members(const fs::path& archive, const std::vector<MemberPatch*>& members, std::vector<char>& compressed) {
+    compressed.assign(members.size(), 0);
+    bsa::Reader r;
+    if (r.open(archive) != bsa::Status::Ok) return false;
+    for (size_t i = 0; i < members.size(); ++i) {
+        bsa::Entry e;
+        if (r.find(members[i]->entryPath, e) == bsa::Status::Ok) compressed[i] = e.compressed ? 1 : 0;
+    }
+    return true;
+}
+
+bool extract_target(const fs::path& archive, const std::string& entryPath, fs::path& out) {
+    constexpr size_t kPrefix = 8;  // "scripts\"
+    if (entryPath.size() <= kPrefix) return false;
+    std::string head = entryPath.substr(0, kPrefix);
+    std::transform(head.begin(), head.end(), head.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    if (head != "scripts\\" && head != "scripts/") return false;
+    std::string rest = entryPath.substr(kPrefix);
+    if (rest.find("..") != std::string::npos || rest[0] == '\\' || rest[0] == '/') return false;
+    std::replace(rest.begin(), rest.end(), '\\', '/');
+    out = archive.parent_path() / "Scripts" / fs::u8path(rest);
+    return true;
+}
+
+void find_other_copies(std::vector<ExtractCandidate>& candidates) {
+    std::map<fs::path, std::vector<ExtractCandidate*>> byFolder;
+    for (ExtractCandidate& c : candidates) byFolder[c.archive.parent_path()].push_back(&c);
+    for (const auto& [folder, list] : byFolder) {
+        std::error_code ec;
+        for (fs::directory_iterator it(folder.empty() ? fs::path(".") : folder, ec), end; !ec && it != end; it.increment(ec)) {
+            std::string ext = it->path().extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+            if (ext != ".bsa") continue;
+            bsa::Reader r;
+            if (r.open(it->path()) != bsa::Status::Ok) continue;
+            for (ExtractCandidate* c : list) {
+                std::error_code same;
+                if (!c->conflict.empty() || fs::equivalent(it->path(), c->archive, same)) continue;
+                bsa::Entry e;
+                std::vector<uint8_t> bytes;
+                if (r.find(c->member->entryPath, e) != bsa::Status::Ok) continue;
+                // A copy that cannot be read cannot be shown to be the same.
+                if (r.read(e, bytes) != bsa::Status::Ok || bytes != c->member->oldBytes) c->conflict = it->path().filename().u8string();
+            }
+        }
+    }
+}
+
+void extract_members(const fs::path& archive, std::vector<MemberPatch*> members, const ArchivePatchOptions& options) {
+    if (members.empty()) return;
+    if (options.dryRun) {
+        for (MemberPatch* m : members) {
+            m->report += "DRYRUN|" + m->label + "|would extract to " + m->extractTo.u8string() + "|" + std::to_string(m->edits.size()) + " edits, 0 renames\n";
+        }
+        return;
+    }
+
+    std::error_code ec;
+    const fs::path absoluteArchive = fs::absolute(archive, ec);
+    const std::string archiveText = (ec ? archive : absoluteArchive).u8string();
+    const fs::path journal = journal_path(archive);
+
+    struct Ready {
+        MemberPatch* member;
+        std::string fileText;
+        uint64_t seq;
+    };
+    std::vector<Ready> ready;
+    std::string why;
+    bool ok = true;
+    uint64_t seq = next_sequence(journal, why, ok);
+    std::string text;
+    std::map<fs::path, uint64_t> newFolders;
+    if (ok) {
+        const std::string now = utc_now();
+        for (MemberPatch* m : members) {
+            const fs::path absoluteFile = fs::absolute(m->extractTo, ec);
+            std::string fileText = (ec ? m->extractTo : absoluteFile).u8string();
+            if (!journal_safe(fileText) || !journal_safe(archiveText) || !journal_safe(m->entryPath) || !journal_safe(options.mapPath)) {
+                member_error(*m, "a path cannot go in the journal; nothing written");
+                continue;
+            }
+            if (fs::exists(m->extractTo, ec)) {
+                member_error(*m, "a file appeared at " + fileText + "; nothing written");
+                continue;
+            }
+            // Folders to create, outermost first, so an undo can take them away.
+            std::vector<fs::path> missing;
+            for (fs::path d = fs::absolute(m->extractTo, ec).parent_path(); !d.empty() && !fs::exists(d, ec) && !newFolders.count(d); d = d.parent_path()) {
+                missing.push_back(d);
+                if (d == d.parent_path()) break;
+            }
+            for (auto d = missing.rbegin(); d != missing.rend(); ++d) {
+                newFolders[*d] = seq;
+                text += "MKDIR|" + std::to_string(seq++) + "|" + d->u8string() + "|" + now + "\n";
+            }
+            text += "EXTRACTED|" + std::to_string(seq) + "|" + fileText + "|" + archiveText + "|" + m->entryPath + "|" +
+                    std::to_string(m->newBytes.size()) + "|" + fnv1a64_hex(m->newBytes) + "|" + options.mapPath + "|" + now + "\n";
+            ready.push_back({m, std::move(fileText), seq++});
+        }
+        ok = ready.empty() || append_journal(journal, text, why);
+    }
+    if (!ok) {
+        for (const Ready& r : ready) member_error(*r.member, "nothing written: " + why);
+        for (MemberPatch* m : members) {
+            if (!m->failed) member_error(*m, "nothing written: " + why);
+        }
+        return;
+    }
+
+    size_t good = 0;
+    for (const Ready& r : ready) {
+        MemberPatch& m = *r.member;
+        std::string reason;
+        const fs::path temp = fs::path(m.extractTo).concat(".pextmp");
+        fs::create_directories(m.extractTo.parent_path(), ec);
+        if (ec) {
+            reason = "cannot create the folder: " + ec.message();
+        } else {
+            fs::remove(temp, ec);
+            RwFile out;
+            if (!out.open(temp, true, reason)) {
+                // reason set
+            } else {
+                const bool wrote = out.write_at(0, m.newBytes.data(), m.newBytes.size()) && out.flush();
+                out.close();
+                if (!wrote) reason = "cannot write the extracted file";
+                else {
+                    fs::rename(temp, m.extractTo, ec);
+                    if (ec) reason = "cannot move the extracted file into place: " + ec.message();
+                }
+            }
+        }
+        if (reason.empty()) {
+            if (options.afterWriteForTest) options.afterWriteForTest(m.extractTo);
+            std::vector<uint8_t> back;
+            if (!read_bytes(m.extractTo, back)) reason = "the extracted file cannot be read";
+            else verify_bytes(back, m, options.extraCallees, reason);
+        }
+        if (!reason.empty()) {
+            std::error_code rm;
+            fs::remove(temp, rm);
+            fs::remove(m.extractTo, rm);
+            const bool gone = !fs::exists(m.extractTo, rm);
+            std::string err;
+            const bool noted = gone && append_journal(journal, "UNDONE|" + std::to_string(r.seq) + "|" + utc_now() + "\n", err);
+            member_error(m, reason + (noted ? "; the extracted file was removed" : "; run pex patch --undo " + journal.u8string()));
+            continue;
+        }
+        m.report += "PATCHED|" + r.fileText + "|" + std::to_string(m.edits.size()) + " edits, 0 renames, extracted from " + m.label + "\n";
+        ++good;
+    }
+    members.back()->report += "JOURNAL|" + archiveText + "|" + journal.u8string() + "|" + std::to_string(good) + " extracted\n";
+}
+
+// --- the game must not be running --------------------------------------------
+
+bool find_running_processes(const std::vector<std::string>& names, std::vector<std::string>& found, std::string& why) {
+    found.clear();
+#ifdef _WIN32
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) {
+        why = "cannot list the running processes (Windows error " + std::to_string(GetLastError()) + ")";
+        return false;
+    }
+    std::set<std::wstring> wanted;
+    for (const std::string& n : names) {
+        std::wstring w = fs::u8path(n).wstring();
+        std::transform(w.begin(), w.end(), w.begin(), [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
+        wanted.insert(std::move(w));
+    }
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof entry;
+    bool more = Process32FirstW(snapshot, &entry) != 0;
+    if (!more && GetLastError() != ERROR_NO_MORE_FILES) {
+        why = "cannot list the running processes (Windows error " + std::to_string(GetLastError()) + ")";
+        CloseHandle(snapshot);
+        return false;
+    }
+    for (; more; more = Process32NextW(snapshot, &entry) != 0) {
+        std::wstring w = entry.szExeFile;
+        std::transform(w.begin(), w.end(), w.begin(), [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
+        if (wanted.count(w)) found.push_back(fs::path(entry.szExeFile).u8string() + " (process " + std::to_string(entry.th32ProcessID) + ")");
+    }
+    CloseHandle(snapshot);
+    return true;
+#else
+    (void)names;
+    why = "listing processes is not implemented on this platform";
+    return false;
+#endif
+}
+
+bool verify_game_not_running(std::string& why) {
+    static const std::vector<std::string> kGame = {"SkyrimSE.exe",     "SkyrimVR.exe",     "TESV.exe",
+                                                   "skse64_loader.exe", "sksevr_loader.exe", "skse_loader.exe"};
+    std::vector<std::string> found;
+    std::string err;
+    if (!find_running_processes(kGame, found, err)) {
+        why = "cannot verify that the game is not running: " + err;
+        return false;
+    }
+    if (!found.empty()) {
+        why = "the game is running: ";
+        for (size_t i = 0; i < found.size(); ++i) why += (i ? ", " : "") + found[i];
+        why += "; close it first";
+        return false;
+    }
+    return true;
+}
+
 // --- undo ------------------------------------------------------------------
 
 int undo_journal(const fs::path& journalFile, bool dryRun, std::string& report) {
@@ -1007,7 +1273,7 @@ int undo_journal(const fs::path& journalFile, bool dryRun, std::string& report) 
         return 1;
     }
     if (parsed.torn) report += "NOTE|" + journalText + "|the last line is incomplete, from a run that stopped before writing; ignored\n";
-    if (parsed.ranges.empty()) {
+    if (parsed.ranges.empty() && parsed.extracts.empty() && parsed.folders.empty()) {
         report += "UNCHANGED|" + journalText + "|nothing to undo\n";
         return 0;
     }
@@ -1146,6 +1412,50 @@ int undo_journal(const fs::path& journalFile, bool dryRun, std::string& report) 
                       std::to_string(bytesPerMember[member]) + " bytes restored, " + std::to_string(counts.second) + " already restored\n";
         }
     }
+    // Files it extracted: deleted only if they are still what it wrote.
+    {
+        const std::string now = utc_now();
+        bool extractsFailed = false;
+        for (const JournalExtract& x : parsed.extracts) {
+            const fs::path file = fs::u8path(x.file);
+            std::error_code ec;
+            if (!fs::exists(file, ec)) {
+                if (!dryRun) marks += "UNDONE|" + std::to_string(x.seq) + "|" + now + "\n";
+                report += std::string(dryRun ? "DRYRUN|" : "UNDONE|") + x.file + "|extracted file already gone\n";
+                continue;
+            }
+            std::vector<uint8_t> bytes;
+            if (!read_bytes(file, bytes) || bytes.size() != x.size || fnv1a64_hex(bytes) != x.hash) {
+                report += "ERR|" + x.file + "|changed since it was extracted from " + x.archive + "; left in place\n";
+                ++failures;
+                extractsFailed = true;
+                continue;
+            }
+            if (dryRun) {
+                report += "DRYRUN|" + x.file + "|would delete the extracted file\n";
+                continue;
+            }
+            fs::remove(file, ec);
+            if (ec) {
+                report += "ERR|" + x.file + "|cannot delete the extracted file: " + ec.message() + "\n";
+                ++failures;
+                extractsFailed = true;
+                continue;
+            }
+            marks += "UNDONE|" + std::to_string(x.seq) + "|" + now + "\n";
+            report += "UNDONE|" + x.file + "|extracted file deleted\n";
+        }
+        // Folders it created, innermost first, and only when empty. While an
+        // extracted file stays, its folder stays and stays in the journal.
+        if (!dryRun && !extractsFailed) {
+            for (auto d = parsed.folders.rbegin(); d != parsed.folders.rend(); ++d) {
+                std::error_code ec;
+                const fs::path folder = fs::u8path(d->folder);
+                if (fs::exists(folder, ec) && !fs::remove(folder, ec)) report += "NOTE|" + d->folder + "|created by the patch, not empty now; left in place\n";
+                marks += "UNDONE|" + std::to_string(d->seq) + "|" + now + "\n";
+            }
+        }
+    }
     // Once, at the end: a folder's journal names one file per script. A stop
     // before this line leaves bytes an undo finds already restored.
     if (!marks.empty() && !append_journal(journalFile, marks, why)) {
@@ -1269,6 +1579,7 @@ bool add_formid_pairs_file(const fs::path& file, pex::FormIdMap& map, std::strin
 // --- the log ------------------------------------------------------------------
 
 std::string skip_reason_code(const std::string& why) {
+    if (why.find("different copy in") != std::string::npos) return "other-copy";
     if (why.find("stored compressed") != std::string::npos) return "compressed";
     if (why.find("shared with") != std::string::npos) return "shared-block";
     if (why.find("renames the plugin") != std::string::npos) return "plugin-rename";
@@ -1281,7 +1592,8 @@ std::string render_patch_log(const LogRun& run, std::vector<LogContainer> contai
         return a.archive != b.archive ? a.archive : a.path < b.path;
     });
     const char* patchedWord = run.dryRun ? "would-patch" : "patched";
-    std::string out = "pex patch log v1\n";
+    const char* extractedWord = run.dryRun ? "would-extract" : "extracted";
+    std::string out = "pex patch log v2\n";
     out += "started|" + run.started + "\n";
     out += std::string("mode|") + (run.dryRun ? "dry-run" : "write") + "\n";
     for (const std::string& in : run.inputs) out += "input|" + in + "\n";
@@ -1289,11 +1601,11 @@ std::string render_patch_log(const LogRun& run, std::vector<LogContainer> contai
     out += "source|" + run.source + "\n";
     out += "pairs|" + std::to_string(run.pairs) + "\n";
 
-    size_t archives = 0, folders = 0, scanned = 0, patched = 0, edits = 0, skipped = 0, notInMap = 0, dynamic = 0;
+    size_t archives = 0, folders = 0, scanned = 0, patched = 0, extracted = 0, edits = 0, skipped = 0, notInMap = 0, dynamic = 0;
     std::map<std::string, size_t> reasons;
     for (const LogContainer& c : containers) {
         scanned += c.scanned;
-        if (c.patched.empty() && c.skipped.empty()) continue;
+        if (c.patched.empty() && c.extracted.empty() && c.skipped.empty()) continue;
         ++(c.archive ? archives : folders);
         out += "\n";
         out += std::string(c.archive ? "[archive] " : "[loose] ") + c.path + "\n";
@@ -1307,6 +1619,14 @@ std::string render_patch_log(const LogRun& run, std::vector<LogContainer> contai
             notInMap += f.notInMap;
             dynamic += f.dynamic;
         }
+        for (const LogFile& f : c.extracted) {
+            out += std::string(extractedWord) + "|" + f.name + "|" + std::to_string(f.edits) + "|";
+            for (size_t i = 0; i < f.pairs.size(); ++i) out += (i ? "," : "") + f.pairs[i];
+            out += "|" + std::to_string(f.notInMap) + "|" + std::to_string(f.dynamic) + "|" + f.extractedTo + "\n";
+            localEdits += f.edits;
+            notInMap += f.notInMap;
+            dynamic += f.dynamic;
+        }
         for (const LogFile& f : c.skipped) {
             std::string detail = f.detail;
             std::replace(detail.begin(), detail.end(), '|', '/');
@@ -1316,9 +1636,10 @@ std::string render_patch_log(const LogRun& run, std::vector<LogContainer> contai
             notInMap += f.notInMap;
             dynamic += f.dynamic;
         }
-        out += "subtotal|scanned " + std::to_string(c.scanned) + "|" + patchedWord + " " + std::to_string(c.patched.size()) + "|edits " +
-               std::to_string(localEdits) + "|skipped " + std::to_string(c.skipped.size()) + "\n";
+        out += "subtotal|scanned " + std::to_string(c.scanned) + "|" + patchedWord + " " + std::to_string(c.patched.size()) + "|" + extractedWord + " " +
+               std::to_string(c.extracted.size()) + "|edits " + std::to_string(localEdits) + "|skipped " + std::to_string(c.skipped.size()) + "\n";
         patched += c.patched.size();
+        extracted += c.extracted.size();
         edits += localEdits;
         skipped += c.skipped.size();
     }
@@ -1327,6 +1648,7 @@ std::string render_patch_log(const LogRun& run, std::vector<LogContainer> contai
     out += "loose-folders|" + std::to_string(folders) + "\n";
     out += "scanned|" + std::to_string(scanned) + "\n";
     out += std::string(patchedWord) + "|" + std::to_string(patched) + "\n";
+    out += std::string(extractedWord) + "|" + std::to_string(extracted) + "\n";
     out += "edits|" + std::to_string(edits) + "\n";
     out += "skipped|" + std::to_string(skipped) + "\n";
     for (const auto& [reason, n] : reasons) out += "skipped." + reason + "|" + std::to_string(n) + "\n";

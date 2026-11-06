@@ -693,6 +693,162 @@ static void test_loose(const fs::path& dir) {
     CHECK(slurp(a) == script);
 }
 
+// --- compressed members become loose files ----------------------------------------
+
+static void test_extract(const fs::path& base) {
+    const fs::path dir = base / "extract";
+    fs::create_directories(dir);
+    const Bytes script = compile_script("PatchMe", kPatchMe);
+    const Bytes other = compile_script("Other", "Scriptname Other\nFunction F()\nEndFunction\n");
+    const fs::path archive = dir / "c.bsa";
+    const Bytes original = build_bsa(0x7, {{"scripts", "patchme.pex", script, true}, {"scripts", "other.pex", other, false}});
+    spit(archive, original);
+    MemberPatch m, o;
+    std::string why;
+    CHECK(plan(script, load_map(kMap), m, why));
+    o.entryPath = "scripts\\other.pex";
+
+    // The flags come from the archive; the toggled-off member is not compressed.
+    std::vector<char> flags;
+    CHECK(find_compressed_members(archive, {&m, &o}, flags));
+    CHECK(flags.size() == 2 && flags[0] == 1 && flags[1] == 0);
+    CHECK(!find_compressed_members(dir / "missing.bsa", {&m}, flags));
+
+    // Scripts\ beside the archive, keeping any subfolder; nothing else qualifies.
+    fs::path target;
+    CHECK(extract_target(archive, kEntry, target));
+    CHECK(target == dir / "Scripts" / "patchme.pex");
+    CHECK(extract_target(archive, "SCRIPTS/sub\\x.pex", target));
+    CHECK(target == dir / "Scripts" / "sub" / "x.pex");
+    CHECK(!extract_target(archive, "meshes\\x.pex", target));
+    CHECK(!extract_target(archive, "scripts\\..\\..\\x.pex", target));
+    CHECK(!extract_target(archive, "scripts\\", target));
+
+    // A dry run says where and creates nothing.
+    CHECK(extract_target(archive, kEntry, m.extractTo));
+    ArchivePatchOptions dry;
+    dry.dryRun = true;
+    extract_members(archive, {&m}, dry);
+    CHECK(!m.failed && contains(m.report, "would extract to "));
+    CHECK(!fs::exists(dir / "Scripts"));
+    CHECK(!fs::exists(journal_path(archive)));
+
+    // The real run: the folder and file appear, the archive does not change.
+    m.report.clear();
+    ArchivePatchOptions real;
+    real.mapPath = "--formid";
+    extract_members(archive, {&m}, real);
+    CHECK(!m.failed);
+    CHECK(contains(m.report, "extracted from A.bsa:"));
+    CHECK(contains(m.report, "1 extracted"));
+    CHECK(slurp(m.extractTo) == m.newBytes);
+    CHECK(!fs::exists(fs::path(m.extractTo).concat(".pextmp")));
+    CHECK(slurp(archive) == original);
+    const std::string journal = slurp_text(journal_path(archive));
+    CHECK(count_of(journal, "\nMKDIR|") == 1);
+    CHECK(count_of(journal, "\nEXTRACTED|") == 1);
+
+    // A dry undo deletes nothing; a real one deletes the file and its new folder.
+    std::string report;
+    CHECK(undo_journal(journal_path(archive), true, report) == 0);
+    CHECK(contains(report, "would delete"));
+    CHECK(fs::exists(m.extractTo));
+    report.clear();
+    CHECK(undo_journal(journal_path(archive), false, report) == 0);
+    CHECK(contains(report, "extracted file deleted"));
+    CHECK(!fs::exists(m.extractTo));
+    CHECK(!fs::exists(dir / "Scripts"));
+    CHECK(slurp(archive) == original);
+    report.clear();
+    CHECK(undo_journal(journal_path(archive), false, report) == 0);
+    CHECK(contains(report, "nothing to undo"));
+
+    // A folder that was already there stays, and so does a file changed since.
+    fs::create_directories(dir / "Scripts");
+    MemberPatch n;
+    CHECK(plan(script, load_map(kMap), n, why));
+    CHECK(extract_target(archive, kEntry, n.extractTo));
+    extract_members(archive, {&n}, real);
+    CHECK(!n.failed);
+    const std::string afterSecond = slurp_text(journal_path(archive));
+    CHECK(count_of(afterSecond, "\nMKDIR|") == 1);  // only the first run's
+    Bytes edited = slurp(n.extractTo);
+    edited[0] ^= 1;
+    spit(n.extractTo, edited);
+    report.clear();
+    CHECK(undo_journal(journal_path(archive), false, report) == 1);
+    CHECK(contains(report, "changed since it was extracted"));
+    CHECK(slurp(n.extractTo) == edited);
+    // Put right, the undo finishes the job and the existing folder stays.
+    spit(n.extractTo, n.newBytes);
+    report.clear();
+    CHECK(undo_journal(journal_path(archive), false, report) == 0);
+    CHECK(!fs::exists(n.extractTo));
+    CHECK(fs::exists(dir / "Scripts"));
+
+    // A file already at the target is never overwritten.
+    const Bytes theirs = {1, 2, 3};
+    spit(dir / "Scripts" / "patchme.pex", theirs);
+    MemberPatch t;
+    CHECK(plan(script, load_map(kMap), t, why));
+    CHECK(extract_target(archive, kEntry, t.extractTo));
+    extract_members(archive, {&t}, real);
+    CHECK(t.failed && contains(t.report, "a file appeared"));
+    CHECK(slurp(dir / "Scripts" / "patchme.pex") == theirs);
+    fs::remove(dir / "Scripts" / "patchme.pex");
+
+    // A file that does not verify is removed, and the journal says so.
+    MemberPatch v;
+    CHECK(plan(script, load_map(kMap), v, why));
+    CHECK(extract_target(archive, kEntry, v.extractTo));
+    ArchivePatchOptions bad;
+    bad.afterWriteForTest = [&](const fs::path& f) {
+        Bytes b = slurp(f);
+        b[v.ranges[0].offset + 3] ^= 1;
+        spit(f, b);
+    };
+    extract_members(archive, {&v}, bad);
+    CHECK(v.failed && contains(v.report, "the extracted file was removed"));
+    CHECK(!fs::exists(v.extractTo));
+    report.clear();
+    CHECK(undo_journal(journal_path(archive), false, report) == 0);
+    CHECK(contains(report, "nothing to undo"));
+
+    // Other archives beside it: a different copy conflicts, an identical one not.
+    const fs::path folder = dir / "copies";
+    fs::create_directories(folder);
+    const fs::path a = folder / "a.bsa", same = folder / "same.bsa";
+    spit(a, build_bsa(0x7, {{"scripts", "patchme.pex", script, true}}));
+    spit(same, build_bsa(0x3, {{"scripts", "patchme.pex", script, false}}));
+    MemberPatch ca;
+    CHECK(plan(script, load_map(kMap), ca, why));
+    std::vector<ExtractCandidate> list = {{a, &ca, std::string()}};
+    find_other_copies(list);
+    CHECK(list[0].conflict.empty());
+    const Bytes changed = compile_script("PatchMe", "Scriptname PatchMe\nFunction F()\nEndFunction\n");
+    spit(folder / "z_other.bsa", build_bsa(0x3, {{"scripts", "patchme.pex", changed, false}}));
+    list = {{a, &ca, std::string()}};
+    find_other_copies(list);
+    CHECK(list[0].conflict == "z_other.bsa");
+    CHECK(skip_reason_code("stored compressed, and there is a different copy in z.bsa: x") == "other-copy");
+}
+
+// --- the game must not be running ----------------------------------------------
+
+static void test_game_check(const char* argv0) {
+    const std::string self = fs::u8path(argv0).filename().u8string();
+    std::vector<std::string> found;
+    std::string why;
+    // This test's own process is the one process known to be running; the name
+    // matches in any case.
+    std::string upper = self;
+    for (char& c : upper) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    CHECK(find_running_processes({upper, "no-such-process.exe"}, found, why));
+    CHECK(found.size() == 1 && contains(found[0], "(process "));
+    CHECK(find_running_processes({"no-such-process.exe"}, found, why));
+    CHECK(found.empty());
+}
+
 // --- FormID pairs ---------------------------------------------------------------
 
 static void test_pairs(const fs::path& dir) {
@@ -760,6 +916,12 @@ static void test_log() {
     good.pairs = {"00000801->00000805", "00000802->00000806"};
     good.dynamic = 1;
     archive.patched.push_back(good);
+    LogFile pulled;
+    pulled.name = "scripts\\d.pex";
+    pulled.edits = 2;
+    pulled.pairs = {"00000801->00000805"};
+    pulled.extractedTo = "C:\\in\\Scripts\\d.pex";
+    archive.extracted.push_back(pulled);
     LogFile compressed;
     compressed.name = "scripts\\b.pex";
     compressed.reason = "compressed";
@@ -781,27 +943,29 @@ static void test_log() {
     quiet.scanned = 7;
 
     const std::string text = render_patch_log(run, {loose, quiet, archive});
-    CHECK(text.rfind("pex patch log v1\nstarted|2026-11-05T12:00:00Z\nmode|write\ninput|C:\\in\nplugin|Foo.esp\nsource|formid\npairs|2\n", 0) == 0);
-    CHECK(contains(text, "\n[archive] C:\\in\\A.bsa\njournal|C:\\in\\A.bsa.pexpatch.journal\npatched|scripts\\a.pex|3|00000801->00000805,00000802->00000806|0|1\nskipped|scripts\\b.pex|compressed|a/b\nsubtotal|scanned 5|patched 1|edits 3|skipped 1\n"));
-    CHECK(contains(text, "\n[loose] C:\\in\\Scripts\nskipped|c.pex|no-edit|2 not in map, 0 dynamic\nsubtotal|scanned 2|patched 0|edits 0|skipped 1\n"));
+    CHECK(text.rfind("pex patch log v2\nstarted|2026-11-05T12:00:00Z\nmode|write\ninput|C:\\in\nplugin|Foo.esp\nsource|formid\npairs|2\n", 0) == 0);
+    CHECK(contains(text, "\n[archive] C:\\in\\A.bsa\njournal|C:\\in\\A.bsa.pexpatch.journal\npatched|scripts\\a.pex|3|00000801->00000805,00000802->00000806|0|1\nextracted|scripts\\d.pex|2|00000801->00000805|0|0|C:\\in\\Scripts\\d.pex\nskipped|scripts\\b.pex|compressed|a/b\nsubtotal|scanned 5|patched 1|extracted 1|edits 5|skipped 1\n"));
+    CHECK(contains(text, "\n[loose] C:\\in\\Scripts\nskipped|c.pex|no-edit|2 not in map, 0 dynamic\nsubtotal|scanned 2|patched 0|extracted 0|edits 0|skipped 1\n"));
     CHECK(!contains(text, "C:\\in\\Other"));
     CHECK(text.find("[archive]") < text.find("[loose]"));
-    CHECK(contains(text, "\n[totals]\narchives|1\nloose-folders|1\nscanned|14\npatched|1\nedits|3\nskipped|2\nskipped.compressed|1\nskipped.no-edit|1\nrefs-not-in-map|2\nrefs-dynamic|1\n"));
+    CHECK(contains(text, "\n[totals]\narchives|1\nloose-folders|1\nscanned|14\npatched|1\nextracted|1\nedits|5\nskipped|2\nskipped.compressed|1\nskipped.no-edit|1\nrefs-not-in-map|2\nrefs-dynamic|1\n"));
 
     run.dryRun = true;
     const std::string dry = render_patch_log(run, {archive});
     CHECK(contains(dry, "mode|dry-run\n"));
     CHECK(contains(dry, "would-patch|scripts\\a.pex|3|"));
-    CHECK(contains(dry, "|would-patch 1|"));
+    CHECK(contains(dry, "|would-patch 1|would-extract 1|"));
+    CHECK(contains(dry, "would-extract|scripts\\d.pex|2|"));
     CHECK(!contains(dry, "\npatched|"));
 
+    CHECK(skip_reason_code("a different copy in z.bsa") == "other-copy");
     CHECK(skip_reason_code("stored compressed (x)") == "compressed");
     CHECK(skip_reason_code("its data block is shared with y") == "shared-block");
     CHECK(skip_reason_code("inside an archive and the map renames the plugin") == "plugin-rename");
     CHECK(skip_reason_code("cannot open") == "failed");
 }
 
-int main() {
+int main(int, char** argv) {
     std::error_code ec;
     const fs::path dir = fs::temp_directory_path(ec) / ("skqe_archive_patch_" + std::to_string(static_cast<unsigned long long>(
                                                             fs::file_time_type::clock::now().time_since_epoch().count())));
@@ -817,6 +981,8 @@ int main() {
     test_refusals(dir);
     test_rollback(dir);
     test_loose(dir);
+    test_extract(dir);
+    test_game_check(argv[0]);
     test_pairs(dir);
     test_log();
     fs::remove_all(dir, ec);
