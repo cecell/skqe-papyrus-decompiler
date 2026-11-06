@@ -1201,6 +1201,47 @@ void extract_members(const fs::path& archive, std::vector<MemberPatch*> members,
     members.back()->report += "JOURNAL|" + archiveText + "|" + journal.u8string() + "|" + std::to_string(good) + " extracted\n";
 }
 
+bool write_verified_script(const fs::path& target, const std::vector<uint8_t>& bytes, const std::vector<pex::PatchEdit>& edits,
+                           const std::vector<std::string>& extraCallees, std::string& why) {
+    std::error_code ec;
+    fs::create_directories(target.parent_path(), ec);
+    if (ec) {
+        why = "cannot create the folder: " + ec.message();
+        return false;
+    }
+    const fs::path temp = fs::path(target).concat(".pextmp");
+    fs::remove(temp, ec);
+    {
+        RwFile out;
+        if (!out.open(temp, true, why)) return false;
+        const bool wrote = out.write_at(0, bytes.data(), bytes.size()) && out.flush();
+        out.close();
+        if (!wrote) {
+            fs::remove(temp, ec);
+            why = "cannot write the file";
+            return false;
+        }
+    }
+    MemberPatch check;
+    check.newBytes = bytes;
+    check.edits = edits;
+    std::vector<uint8_t> back;
+    if (!read_bytes(temp, back)) why = "the written file cannot be read";
+    else verify_bytes(back, check, extraCallees, why);
+    if (!why.empty()) {
+        fs::remove(temp, ec);
+        return false;
+    }
+    fs::rename(temp, target, ec);
+    if (ec) {
+        why = "cannot move the file into place: " + ec.message();
+        std::error_code rm;
+        fs::remove(temp, rm);
+        return false;
+    }
+    return true;
+}
+
 // --- the game must not be running --------------------------------------------
 
 bool find_running_processes(const std::vector<std::string>& names, std::vector<std::string>& found, std::string& why) {

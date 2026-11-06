@@ -156,6 +156,16 @@ pex patch --undo <journal> [--dry-run]
                                  restores every byte a journal's patches changed
                                  and deletes what they extracted; a run writes one
                                  journal per archive and folder
+pex patch <Data> --out <folder> --load-order <plugins.txt> [--all-plugins]
+                  (--plugin <Name.esp> --formid OLD:NEW ... | --map <FormIDMap>)
+                                 changes nothing in Data: each script's one winning
+                                 copy, patched, goes to <folder>\scripts\ to install
+                                 as a mod. Output copy, then loose, then the last
+                                 loaded archive; load order rules from spf; active
+                                 plugins only unless --all-plugins; the mode for a
+                                 whole setup; docs/INTEGRATION.md
+pex winners <Data> --load-order <plugins.txt> [--all-plugins]
+                                 the copy of each script the game loads, as CSV
 pex check --rewrite <input>      read + write, compare byte for byte
 pex check --asm <input> --tools "<game>\Papyrus Compiler"
 pex check --assemble <input> [--tools "<game>\Papyrus Compiler"]

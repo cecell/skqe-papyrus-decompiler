@@ -52,10 +52,24 @@ if(SKQE_PAPYRUS_BUILD_TOOLS)
     FetchContent_Declare(bsa_reader
         GIT_REPOSITORY https://github.com/cecell/bsa-reader.git
         GIT_TAG bbff0cbc5cd04d39bb3b50c470c579669c027dbf)  # v0.1.1
-    FetchContent_MakeAvailable(bsa_reader)
+    # spf (GPL-3.0, github.com/cecell/skyrim-plugin-format): the load order and
+    # which archives load, for patch --out and winners, so that the rule lives
+    # in one place. Changes go to that repo, then bump this pin. Only the
+    # library is built, not its tool or tests.
+    FetchContent_Declare(spf
+        GIT_REPOSITORY https://github.com/cecell/skyrim-plugin-format.git
+        GIT_TAG fb54c31e28c1e4b7957a021b854876c79f38a901
+        EXCLUDE_FROM_ALL)
+    FetchContent_MakeAvailable(bsa_reader spf)
+    # spf registers its test ("unit") whether or not it is the top project; it
+    # is not built here, and spf's own repo runs it. ctest applies this to every
+    # test of that name, so no test here may be called unit.
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.28)
+        set_property(TEST unit DIRECTORY ${spf_BINARY_DIR} PROPERTY DISABLED TRUE)
+    endif()
 
-    add_executable(pex tools/pex.cpp tools/archive_patch.cpp)
-    target_link_libraries(pex PRIVATE skqe::papyrus bsa::reader)
+    add_executable(pex tools/pex.cpp tools/archive_patch.cpp tools/out_patch.cpp)
+    target_link_libraries(pex PRIVATE skqe::papyrus bsa::reader spf)
     if(MSVC)
         target_compile_options(pex PRIVATE /W4 /permissive- /utf-8 /EHsc)
         target_compile_definitions(pex PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -74,11 +88,11 @@ if(SKQE_PAPYRUS_BUILD_TESTS)
     if(MSVC)
         target_compile_options(skqe_papyrus_tests PRIVATE /W4 /permissive- /utf-8 /EHsc)
     endif()
-    add_test(NAME unit COMMAND skqe_papyrus_tests)
+    add_test(NAME papyrus_unit COMMAND skqe_papyrus_tests)
     if(SKQE_PAPYRUS_BUILD_TOOLS)
         # Needs bsa-reader, which only the tool links.
-        add_executable(skqe_archive_patch_tests tests/test_archive_patch.cpp tools/archive_patch.cpp)
-        target_link_libraries(skqe_archive_patch_tests PRIVATE skqe::papyrus bsa::reader)
+        add_executable(skqe_archive_patch_tests tests/test_archive_patch.cpp tools/archive_patch.cpp tools/out_patch.cpp)
+        target_link_libraries(skqe_archive_patch_tests PRIVATE skqe::papyrus bsa::reader spf)
         target_include_directories(skqe_archive_patch_tests PRIVATE tools)
         if(MSVC)
             target_compile_options(skqe_archive_patch_tests PRIVATE /W4 /permissive- /utf-8 /EHsc)

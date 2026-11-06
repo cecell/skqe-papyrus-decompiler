@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "archive_patch.hpp"
 #include "inputs.hpp"
+#include "out_patch.hpp"
 #include "papyrus/analysis.hpp"
 #include "papyrus/assemble.hpp"
 #include "papyrus/audit.hpp"
@@ -154,6 +155,25 @@ commands
                                archive and folder; --formid writes one by default
                                next to the input, unless --dry-run
                                (docs/INTEGRATION.md)
+  patch <Data> --out <folder> --load-order <plugins.txt> [--all-plugins]
+            [--ini-dir <dir>] (--plugin Name.esp --formid OLD:NEW ... | --map <FormIDMap>)
+            [--log <file>] [--callee Name,...] [--dry-run]
+                               changes nothing in Data. For each script the game
+                               would load, the one winning copy gets the changes
+                               and is written to <folder>\scripts\, to package
+                               and install as a mod. A copy already in <folder>
+                               wins, then the loose file in Data\Scripts, then
+                               the loaded archive that loads last. Only active
+                               plugins count; --all-plugins counts inactive ones
+                               too, in plugins.txt order. A plugin plugins.txt
+                               does not list never counts, and its archives do
+                               not load. Renames work. A rerun with the same
+                               pairs changes nothing. The log goes beside
+                               <folder> and lists the losing copies. Refuses
+                               while the game runs, with no override
+  winners <Data> --load-order <plugins.txt> [--all-plugins] [--ini-dir <dir>]
+                               lists the copy of each script the game loads,
+                               as CSV: script, kind, source
   patch --undo <journal> [--dry-run]
                                restores every byte the journal's patches
                                changed and deletes the files they extracted;
@@ -250,6 +270,9 @@ struct Options {
     std::vector<std::string> formids;
     std::string formidsFile;
     std::string log;
+    std::string loadOrder;
+    std::vector<std::string> iniDirs;
+    bool allPlugins = false;
     std::string callees;
     bool csv = false;
     bool rules = false;
@@ -299,6 +322,9 @@ bool parse(int argc, char** argv, int from, Options& o, const char* cmd) {
         else if (a == "--formid" && hasNext) o.formids.push_back(argv[++i]);
         else if (a == "--formids" && hasNext) o.formidsFile = argv[++i];
         else if (a == "--log" && hasNext) o.log = argv[++i];
+        else if (a == "--load-order" && hasNext) o.loadOrder = argv[++i];
+        else if (a == "--ini-dir" && hasNext) o.iniDirs.push_back(argv[++i]);
+        else if (a == "--all-plugins") o.allPlugins = true;
         else if (a == "--comments") o.comments = true;
         else if (a == "--keep-generated") o.keepGenerated = true;
         else if (a == "--optional-objects") o.optionalObjects = true;
@@ -1914,8 +1940,33 @@ int cmd_patch(int argc, char** argv) {
         std::fprintf(stderr, "patch needs --map <FormIDMap file>, or --plugin <Name.esp> with --formid OLD:NEW or --formids <file>\n");
         return 2;
     }
+    const bool toOutput = !o.out.empty();
+    if (toOutput) {
+        // One game folder, and nothing in it is written to.
+        std::error_code folderEc;
+        if (o.inputs.size() != 1 || !fs::is_directory(fs::u8path(o.inputs[0]), folderEc)) {
+            std::fprintf(stderr, "patch --out takes one input: the game's Data folder\n");
+            return 2;
+        }
+        if (o.loadOrder.empty()) {
+            std::fprintf(stderr, "patch --out needs --load-order <plugins.txt>: it decides which copy of a script wins\n");
+            return 2;
+        }
+        if (o.backup) {
+            std::fprintf(stderr, "patch --out changes nothing that could need a backup; remove --backup\n");
+            return 2;
+        }
+        const std::string outWhy = pextool::check_output_folder(fs::u8path(o.inputs[0]), fs::u8path(o.out));
+        if (!outWhy.empty()) {
+            std::fprintf(stderr, "--out: %s\n", outWhy.c_str());
+            return 2;
+        }
+    } else if (!o.loadOrder.empty() || !o.iniDirs.empty() || o.allPlugins) {
+        std::fprintf(stderr, "--load-order, --ini-dir and --all-plugins go with --out\n");
+        return 2;
+    }
     std::vector<pextool::Item> items;
-    if (!collect(o, items)) return 2;
+    if (!toOutput && !collect(o, items)) return 2;
     pex::FormIdMap map;
     std::string err;
     if (o.map.empty()) {
@@ -1964,7 +2015,16 @@ int cmd_patch(int argc, char** argv) {
     // created first, so nothing is patched without somewhere to report it.
     fs::path logPath;
     if (!o.log.empty()) logPath = fs::u8path(o.log);
-    else if (o.map.empty() && !o.dryRun) logPath = pextool::default_log_path(fs::u8path(o.inputs[0]));
+    else if (toOutput && !o.dryRun) logPath = pextool::default_log_path(fs::u8path(o.out));  // beside it, so it is not packaged
+    else if (!toOutput && o.map.empty() && !o.dryRun) logPath = pextool::default_log_path(fs::u8path(o.inputs[0]));
+    if (toOutput && !o.dryRun) {
+        std::error_code createEc;
+        fs::create_directories(fs::u8path(o.out), createEc);
+        if (createEc) {
+            std::fprintf(stderr, "cannot create %s: %s\n", o.out.c_str(), createEc.message().c_str());
+            return 2;
+        }
+    }
     if (!logPath.empty()) {
         std::ofstream probe(logPath, std::ios::binary | std::ios::trunc);
         if (!probe) {
@@ -1982,6 +2042,39 @@ int cmd_patch(int argc, char** argv) {
 
     const std::vector<std::string> extra = split_list(o.callees, ',');
     std::printf("MAP|%s|%s|%zu entries\n", map.plugin.c_str(), map.newPlugin.c_str(), map.oldToNew.size());
+    if (toOutput) {
+        pextool::OutOptions oo;
+        oo.data = fs::u8path(o.inputs[0]);
+        oo.outFolder = fs::u8path(o.out);
+        oo.pluginsTxt = fs::u8path(o.loadOrder);
+        for (const std::string& d : o.iniDirs) oo.iniDirs.push_back(fs::u8path(d));
+        oo.allPlugins = o.allPlugins;
+        oo.extraCallees = extra;
+        oo.dryRun = o.dryRun;
+        oo.threads = o.threads;
+        oo.source = logRun.source;
+        std::string report, logText;
+        int outFailures = pextool::patch_to_output(oo, map, report, logText);
+        std::fputs(report.c_str(), stdout);
+        if (!logPath.empty()) {
+            if (logText.empty()) {
+                // Refused before the run began: nothing to report but the ERR line.
+                std::error_code removeEc;
+                fs::remove(logPath, removeEc);
+            } else {
+                std::ofstream logFile(logPath, std::ios::binary | std::ios::trunc);
+                logFile.write(logText.data(), static_cast<std::streamsize>(logText.size()));
+                logFile.close();
+                if (!logFile) {
+                    std::fprintf(stderr, "cannot write the log %s\n", logPath.u8string().c_str());
+                    ++outFailures;
+                } else {
+                    std::printf("LOG|%s\n", logPath.u8string().c_str());
+                }
+            }
+        }
+        return outFailures ? 1 : 0;
+    }
     std::atomic<int> failures{0};
     std::mutex mu;
     std::vector<std::string> rows(items.size());
@@ -2304,6 +2397,25 @@ int cmd_patch(int argc, char** argv) {
     return failures ? 1 : 0;
 }
 
+int cmd_winners(int argc, char** argv) {
+    Options o;
+    if (!parse(argc, argv, 2, o, "winners")) return 2;
+    std::error_code ec;
+    if (o.inputs.size() != 1 || !fs::is_directory(fs::u8path(o.inputs[0]), ec) || o.loadOrder.empty()) {
+        std::fprintf(stderr, "winners takes the game's Data folder and --load-order <plugins.txt>\n");
+        return 2;
+    }
+    std::vector<fs::path> iniDirs;
+    for (const std::string& d : o.iniDirs) iniDirs.push_back(fs::u8path(d));
+    std::string csv, why;
+    if (!pextool::list_winners(fs::u8path(o.inputs[0]), fs::u8path(o.loadOrder), iniDirs, o.allPlugins, csv, why)) {
+        std::fprintf(stderr, "%s\n", why.c_str());
+        return 1;
+    }
+    std::fputs(csv.c_str(), stdout);
+    return 0;
+}
+
 int help() {
     std::fputs(kHelp, stdout);
     return 0;
@@ -2346,6 +2458,7 @@ int main(int argc, char** argv_) {
     if (cmd == "diff") return cmd_diff(argc, argv.data());
     if (cmd == "closure") return cmd_closure(argc, argv.data());
     if (cmd == "patch") return cmd_patch(argc, argv.data());
+    if (cmd == "winners") return cmd_winners(argc, argv.data());
     if (cmd == "check") return cmd_check(argc, argv.data());
     std::fprintf(stderr, "unknown command %s (pex help)\n", cmd.c_str());
     return 2;

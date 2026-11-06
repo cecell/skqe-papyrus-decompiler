@@ -3,6 +3,7 @@
 // cases that must be refused are refused with the archive untouched.
 // SPDX-License-Identifier: GPL-3.0-only
 #include "archive_patch.hpp"
+#include "out_patch.hpp"
 
 #include "bsa/reader.hpp"
 #include "papyrus/analysis.hpp"
@@ -849,6 +850,323 @@ static void test_game_check(const char* argv0) {
     CHECK(found.empty());
 }
 
+// --- patch --out: one winning copy, in a folder of its own ---------------------------
+
+// A plugin file with only its header: enough for a load order. Test data, built
+// here because no real plugin is small enough to commit.
+static Bytes tiny_plugin(uint32_t flags) {
+    Bytes b = {'T', 'E', 'S', '4'};
+    put32(b, 0);
+    put32(b, flags);
+    put32(b, 0);
+    put32(b, 0);
+    put32(b, 0);
+    return b;
+}
+
+static std::string script_text(const char* name, int id) {
+    return std::string("Scriptname ") + name + "\nForm Function Fetch()\n    Return Game.GetFormFromFile(" + std::to_string(id) + ", \"Foo.esp\")\nEndFunction\n";
+}
+
+static int32_t only_ref(const Bytes& bytes) {
+    pex::Script s;
+    CHECK(pex::read(bytes.data(), bytes.size(), s) == pex::Status::Ok);
+    return ref_with_ip_order(s, 0);
+}
+
+static void test_out(const fs::path& base) {
+    const fs::path root = base / "out";
+    const fs::path data = root / "Data", iniDir = root / "ini", output = root / "mod" / "output";
+    fs::create_directories(data);
+    fs::create_directories(iniDir);
+
+    // Load order: Esp1, then EspM, which is flagged a master though named .esp
+    // and so loads first, then Esp2; Off is present and not active.
+    spit(data / "Skyrim.esm", tiny_plugin(1));
+    spit(data / "Esp1.esp", tiny_plugin(0));
+    spit(data / "EspM.esp", tiny_plugin(1));
+    spit(data / "Esp2.esp", tiny_plugin(0));
+    spit(data / "Off.esp", tiny_plugin(0));
+    spit(data / "Unlisted.esp", tiny_plugin(0));  // in Data, not in plugins.txt
+    const fs::path plugins = root / "plugins.txt";
+    {
+        std::ofstream f(plugins, std::ios::binary);
+        f << "*Esp1.esp\n*EspM.esp\n*Esp2.esp\nOff.esp\n";
+    }
+    {
+        std::ofstream f(iniDir / "Skyrim.ini", std::ios::binary);
+        f << "[Archive]\nsResourceArchiveList=Base.bsa\nsResourceArchiveList2=\n";
+    }
+    auto copy_of = [](const char* name, int id) { return compile_script(name, script_text(name, id).c_str()); };
+
+    // In one archive that loads: from it, whatever its name.
+    spit(data / "Base.bsa", build_bsa(0x3, {{"scripts", "onlybase.pex", copy_of("OnlyBase", 0x801)},
+                                            {"scripts", "basevsmod.pex", copy_of("BaseVsMod", 0x802)},
+                                            {"scripts\\source", "deep.pex", copy_of("Deep", 0x808)}}));
+    // Esp1 loses to Esp2 in plugins.txt order. EspM is listed in between but is a
+    // master, so it loads first of the three and loses too.
+    spit(data / "Esp1.bsa", build_bsa(0x7, {{"scripts", "basevsmod.pex", copy_of("BaseVsMod", 0x803), true},
+                                            {"scripts", "ordered.pex", copy_of("Ordered", 0x804), true}}));
+    spit(data / "EspM.bsa", build_bsa(0x3, {{"scripts", "ordered.pex", copy_of("Ordered", 0x807)},
+                                            {"scripts", "masterlast.pex", copy_of("MasterLast", 0x809)}}));
+    spit(data / "Esp2 - Textures.bsa", build_bsa(0x7, {{"scripts", "ordered.pex", copy_of("Ordered", 0x805), true},
+                                                       {"scripts", "masterlast.pex", copy_of("MasterLast", 0x80A), true}}));
+    // A loose copy beats every archive.
+    spit(data / "Esp2.bsa", build_bsa(0x3, {{"scripts", "looser.pex", copy_of("Looser", 0x806)}}));
+    fs::create_directories(data / "Scripts");
+    fs::create_directories(data / "Scripts" / "Source");
+    spit(data / "Scripts" / "Looser.pex", copy_of("Looser", 0x80B));
+    spit(data / "Scripts" / "Source" / "stale.pex", copy_of("Stale", 0x801));
+    // An archive that does not load neither wins nor blocks.
+    spit(data / "Off.bsa", build_bsa(0x3, {{"scripts", "onlybase.pex", copy_of("OnlyBase", 0x80C)},
+                                           {"scripts", "onlyoff.pex", copy_of("OnlyOff", 0x80D)}}));
+    // Nor does the archive of a plugin plugins.txt does not list, with
+    // --all-plugins or without.
+    spit(data / "Unlisted.bsa", build_bsa(0x3, {{"scripts", "ordered.pex", copy_of("Ordered", 0x80F)},
+                                                {"scripts", "onlyunlisted.pex", copy_of("OnlyUnlisted", 0x810)}}));
+    // A name no plugin or ini claims does not load either.
+    spit(data / "Stray0.bsa", build_bsa(0x3, {{"scripts", "onlystray.pex", copy_of("OnlyStray", 0x80E)}}));
+
+    ArchivePlan plan;
+    std::string why;
+    CHECK(plan_archives(data, plugins, {iniDir}, false, plan, why));
+    std::map<std::string, int> rank;
+    for (const ArchivePlan::Loaded& l : plan.loaded) rank[l.path.filename().u8string()] = l.rank;
+    CHECK(plan.loaded.size() == 5);
+    CHECK(rank["Base.bsa"] == 0);
+    CHECK(rank["EspM.bsa"] < rank["Esp1.bsa"]);  // the ESM flag beats plugins.txt
+    CHECK(rank["Esp1.bsa"] < rank["Esp2.bsa"]);
+    CHECK(rank["Esp2.bsa"] < rank["Esp2 - Textures.bsa"]);
+    CHECK(plan.notLoaded.size() == 3);
+
+    std::vector<std::string> warnings;
+    auto scripts = collect_script_copies(data, fs::path(), plan, warnings);
+    auto winner = [&](const char* key) {
+        const auto& copies = scripts[key];
+        const int w = winning_copy(copies);
+        return w < 0 ? std::string() : copies[static_cast<size_t>(w)].item.label;
+    };
+    CHECK(contains(winner("onlybase.pex"), "Base.bsa:"));     // beats the unloaded Off.bsa
+    CHECK(contains(winner("basevsmod.pex"), "Esp1.bsa:"));    // a plugin's archive beats an ini's
+    CHECK(contains(winner("ordered.pex"), "Esp2 - Textures.bsa:"));
+    CHECK(contains(winner("masterlast.pex"), "Esp2 - Textures.bsa:"));
+    CHECK(contains(winner("looser.pex"), "Looser.pex") && !contains(winner("looser.pex"), ".bsa:"));
+    CHECK(winner("onlyoff.pex").empty());                     // only in an archive that does not load
+    CHECK(winner("onlystray.pex").empty());
+    CHECK(winner("onlyunlisted.pex").empty());
+    CHECK(scripts.count("deep.pex") == 0);                    // not directly under scripts
+    CHECK(scripts.count("stale.pex") == 0);
+
+    // --all-plugins: Off is inactive and listed last, so now it loads, last, and
+    // wins. Unlisted still does not, and neither does the name nobody claims.
+    {
+        ArchivePlan every;
+        CHECK(plan_archives(data, plugins, {iniDir}, true, every, why));
+        std::map<std::string, int> everyRank;
+        for (const ArchivePlan::Loaded& l : every.loaded) everyRank[l.path.filename().u8string()] = l.rank;
+        CHECK(every.loaded.size() == 6);
+        CHECK(everyRank.count("Off.bsa") == 1);
+        CHECK(everyRank["Off.bsa"] > everyRank["Esp2 - Textures.bsa"]);
+        CHECK(everyRank["EspM.bsa"] < everyRank["Esp1.bsa"]);  // masters still first
+        CHECK(everyRank.count("Unlisted.bsa") == 0);
+        CHECK(everyRank.count("Stray0.bsa") == 0);
+        CHECK(every.notLoaded.size() == 2);
+        std::vector<std::string> w;
+        auto all = collect_script_copies(data, fs::path(), every, w);
+        auto allWinner = [&](const char* key) {
+            const auto& copies = all[key];
+            const int i = winning_copy(copies);
+            return i < 0 ? std::string() : copies[static_cast<size_t>(i)].item.label;
+        };
+        CHECK(contains(allWinner("onlybase.pex"), "Off.bsa:"));
+        CHECK(contains(allWinner("onlyoff.pex"), "Off.bsa:"));
+        CHECK(contains(allWinner("ordered.pex"), "Esp2 - Textures.bsa:"));
+        CHECK(allWinner("onlyunlisted.pex").empty());
+        CHECK(allWinner("onlystray.pex").empty());
+        std::string allList, allWhy;
+        CHECK(list_winners(data, plugins, {iniDir}, true, allList, allWhy));
+        CHECK(contains(allList, "onlyoff.pex,archive,"));
+        CHECK(!contains(allList, "onlyunlisted.pex"));
+        OutOptions a;
+        a.data = data;
+        a.outFolder = root / "mod" / "allplugins";
+        a.pluginsTxt = plugins;
+        a.iniDirs = {iniDir};
+        a.allPlugins = true;
+        a.source = "formid";
+        std::string aReport, aLog;
+        CHECK(patch_to_output(a, load_map("!PLUGIN=Foo.esp\n0000080C|00000A0C\n00000801|00000A01\n"), aReport, aLog) == 0);
+        CHECK(contains(aLog, "plugins-counted|all-listed\n"));
+        CHECK(contains(aReport, "ORDER|every listed plugin, "));
+        CHECK(only_ref(slurp(a.outFolder / "scripts" / "onlybase.pex")) == 0xA0C);  // Off.bsa's copy, not Base.bsa's
+    }
+
+    std::string list, listWhy;
+    CHECK(list_winners(data, plugins, {iniDir}, false, list, listWhy));
+    CHECK(contains(list, "looser.pex,loose,"));
+    CHECK(contains(list, "ordered.pex,archive,"));
+    CHECK(!contains(list, "onlyoff.pex"));
+
+    // Everything Data holds, to compare afterwards.
+    auto snapshot = [&] {
+        std::map<std::string, Bytes> all;
+        for (const auto& e : fs::recursive_directory_iterator(data)) {
+            if (e.is_regular_file()) all[e.path().u8string()] = slurp(e.path());
+        }
+        return all;
+    };
+    const auto before = snapshot();
+
+    OutOptions o;
+    o.data = data;
+    o.outFolder = output;
+    o.pluginsTxt = plugins;
+    o.iniDirs = {iniDir};
+    o.source = "formid";
+    pex::FormIdMap all = load_map(
+        "!PLUGIN=Foo.esp\n00000801|00000A01\n00000802|00000A02\n00000803|00000A03\n00000804|00000A04\n00000805|00000A05\n00000806|00000A06\n"
+        "00000807|00000A07\n00000809|00000A09\n0000080A|00000A0A\n0000080B|00000A0B\n0000080D|00000A0D\n0000080E|00000A0E\n");
+
+    // A dry run writes nothing at all.
+    std::string report, text;
+    o.dryRun = true;
+    CHECK(patch_to_output(o, all, report, text) == 0);
+    CHECK(contains(report, "ORDER|"));
+    CHECK(contains(report, "DRYRUN|"));
+    CHECK(contains(text, "mode|dry-run\n") && contains(text, "\nwould-patch|"));
+    CHECK(contains(text, "plugins-counted|active\n"));
+    CHECK(contains(report, "ORDER|active plugins, "));
+    CHECK(!fs::exists(output));
+    CHECK(snapshot() == before);
+
+    // The real run.
+    o.dryRun = false;
+    report.clear();
+    text.clear();
+    CHECK(patch_to_output(o, all, report, text) == 0);
+    CHECK(snapshot() == before);
+    const fs::path out = output / "scripts";
+    auto got = [&](const char* name) { return only_ref(slurp(out / name)); };
+    CHECK(got("onlybase.pex") == 0xA01);
+    CHECK(got("basevsmod.pex") == 0xA03);  // from Esp1.bsa, not Base.bsa's 0x802
+    CHECK(got("ordered.pex") == 0xA05);
+    CHECK(got("masterlast.pex") == 0xA0A);
+    CHECK(got("Looser.pex") == 0xA0B);     // keeps the loose file's spelling
+    CHECK(!fs::exists(out / "onlyoff.pex"));
+    CHECK(!fs::exists(out / "onlystray.pex"));
+    CHECK(!fs::exists(out / "deep.pex"));
+    size_t files = 0;
+    for (const auto& e : fs::directory_iterator(out)) files += e.is_regular_file() ? 1 : 0;
+    CHECK(files == 5);
+    // Compressed sources make no difference, and nothing lands beside scripts\.
+    size_t top = 0;
+    for (const auto& e : fs::directory_iterator(output)) top += e.path().filename() != "scripts" ? 1 : 0;
+    CHECK(top == 0);
+    CHECK(fs::exists(output_state_path(output)));
+    CHECK(output_state_path(output).parent_path() == fs::absolute(output).lexically_normal().parent_path());
+
+    // The log says what won, and what lost and would have changed.
+    CHECK(text.rfind("pex patch output log v1\n", 0) == 0);
+    CHECK(contains(text, "\npatched|ordered.pex|1|0|00000805->00000A05|0|0|archive|Esp2 - Textures.bsa:"));
+    CHECK(contains(text, "\npatched|Looser.pex|1|0|0000080B->00000A0B|0|0|loose|"));
+    CHECK(contains(text, "\nlost|ordered.pex|1|00000804->00000A04|archive|Esp1.bsa:"));
+    CHECK(contains(text, "\nlost|onlyoff.pex|1|0000080D->00000A0D|not-loaded|Off.bsa:scripts\\onlyoff.pex|\n"));
+    CHECK(contains(text, "\n[totals]\nscripts|"));
+    CHECK(contains(text, "\npatched|5\nedits|5\n"));
+    CHECK(contains(report, "LOST|Off.bsa:scripts\\onlyoff.pex|1 edits|its archive does not load\n"));
+
+    // The same run again: the output copies are what win, and they do not move.
+    const Bytes firstRun = slurp(out / "ordered.pex");
+    report.clear();
+    text.clear();
+    CHECK(patch_to_output(o, all, report, text) == 0);
+    CHECK(slurp(out / "ordered.pex") == firstRun);
+    CHECK(contains(text, "\npatched|0\n"));
+
+    // A map whose new value is another entry's old value is the case that would
+    // renumber twice. Run once it is right; run again it must not move.
+    const fs::path chainOut = root / "mod" / "chain";
+    OutOptions c = o;
+    c.outFolder = chainOut;
+    const pex::FormIdMap chain = load_map("!PLUGIN=Foo.esp\n00000805|00000C01\n00000C01|00000C02\n");
+    report.clear();
+    text.clear();
+    CHECK(patch_to_output(c, chain, report, text) == 0);
+    CHECK(only_ref(slurp(chainOut / "scripts" / "ordered.pex")) == 0xC01);
+    report.clear();
+    text.clear();
+    CHECK(patch_to_output(c, chain, report, text) == 0);
+    CHECK(only_ref(slurp(chainOut / "scripts" / "ordered.pex")) == 0xC01);
+    CHECK(contains(report, "already applied"));
+    CHECK(contains(text, "\nskipped.already-applied|1\n"));
+
+    // Other pairs for the same plugin on that copy: refused, the copy untouched.
+    const pex::FormIdMap other = load_map("!PLUGIN=Foo.esp\n00000C01|00000D01\n");
+    report.clear();
+    text.clear();
+    CHECK(patch_to_output(c, other, report, text) == 1);
+    CHECK(contains(report, "already patched for Foo.esp with other pairs"));
+    CHECK(only_ref(slurp(chainOut / "scripts" / "ordered.pex")) == 0xC01);
+
+    // Two plugins compose: the second run starts from the first's output.
+    const Bytes two = compile_script("TwoPlugins",
+                                     "Scriptname TwoPlugins\nFunction F()\n    Game.GetFormFromFile(0x811, \"Foo.esp\")\n    Game.GetFormFromFile(0x812, \"Bar.esp\")\nEndFunction\n");
+    spit(data / "Scripts" / "TwoPlugins.pex", two);
+    const fs::path both = root / "mod" / "both";
+    OutOptions b = o;
+    b.outFolder = both;
+    CHECK(patch_to_output(b, load_map("!PLUGIN=Foo.esp\n00000811|00000E11\n"), report, text) == 0);
+    CHECK(patch_to_output(b, load_map("!PLUGIN=Bar.esp\n00000812|00000E12\n"), report, text) == 0);
+    {
+        pex::Script s;
+        const Bytes bytes = slurp(both / "scripts" / "TwoPlugins.pex");
+        CHECK(pex::read(bytes.data(), bytes.size(), s) == pex::Status::Ok);
+        CHECK(ref_with_ip_order(s, 0) == 0xE11);
+        CHECK(ref_with_ip_order(s, 1) == 0xE12);
+    }
+
+    // A rename changes the length, which is fine in a loose file.
+    const fs::path renamed = root / "mod" / "renamed";
+    OutOptions r = o;
+    r.outFolder = renamed;
+    report.clear();
+    CHECK(patch_to_output(r, load_map("!PLUGIN=Foo.esp\n!NEWPLUGIN=MuchLongerName.esp\n00000811|00000F11\n"), report, text) == 0);
+    {
+        pex::Script s;
+        const Bytes bytes = slurp(renamed / "scripts" / "TwoPlugins.pex");
+        CHECK(bytes.size() > two.size());
+        CHECK(pex::read(bytes.data(), bytes.size(), s) == pex::Status::Ok);
+        const auto refs = pex::find_form_refs(s);
+        CHECK(!refs.empty() && refs[0].plugin == "MuchLongerName.esp" && refs[0].formId == 0xF11);
+    }
+
+    // The output folder must stay away from Data.
+    CHECK(!check_output_folder(data, output).empty() == false);
+    CHECK(contains(check_output_folder(data, data), "inside"));
+    CHECK(contains(check_output_folder(data, data / "Sub"), "inside"));
+    CHECK(contains(check_output_folder(data, root), "contains"));
+    CHECK(check_output_folder(root / "Data2", data).empty());  // a shared name prefix is not inside
+
+    // A plugin's own ini that changes the lists stops the run rather than guess.
+    {
+        std::ofstream f(data / "Esp2.ini", std::ios::binary);
+        f << "[Archive]\nsResourceArchiveList2=Base.bsa\n";
+    }
+    ArchivePlan blocked;
+    CHECK(!plan_archives(data, plugins, {iniDir}, false, blocked, why));
+    CHECK(contains(why, "Esp2.ini"));
+    report.clear();
+    text.clear();
+    CHECK(patch_to_output(o, all, report, text) == 1);
+    CHECK(contains(report, "ERR|load-order|"));
+    CHECK(text.empty());
+    fs::remove(data / "Esp2.ini");
+
+    // No usable load order.
+    CHECK(!plan_archives(data, root / "missing.txt", {iniDir}, false, blocked, why));
+    CHECK(!plan_archives(root / "nowhere", plugins, {iniDir}, false, blocked, why));
+}
+
 // --- FormID pairs ---------------------------------------------------------------
 
 static void test_pairs(const fs::path& dir) {
@@ -982,6 +1300,7 @@ int main(int, char** argv) {
     test_rollback(dir);
     test_loose(dir);
     test_extract(dir);
+    test_out(dir);
     test_game_check(argv[0]);
     test_pairs(dir);
     test_log();

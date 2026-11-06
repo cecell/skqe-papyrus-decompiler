@@ -134,6 +134,12 @@ void extract_members(const std::filesystem::path& archive, std::vector<MemberPat
 // failures.
 int undo_journal(const std::filesystem::path& journal, bool dryRun, std::string& report);
 
+// Writes a patched script to `target` under a temporary name, reads that back,
+// checks it, and only then moves it into place, replacing what was there. A
+// failure leaves `target` as it was. False with the reason.
+bool write_verified_script(const std::filesystem::path& target, const std::vector<uint8_t>& bytes,
+                           const std::vector<papyrus::pex::PatchEdit>& edits, const std::vector<std::string>& extraCallees, std::string& why);
+
 // --- the game must not be running --------------------------------------------
 
 // False, with the reason, when a Skyrim or SKSE loader process is running, or
