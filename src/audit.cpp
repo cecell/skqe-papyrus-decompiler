@@ -52,6 +52,11 @@ bool ends_with(std::string_view v, std::string_view suffix) {
 // Rule ids (stable; documented in docs/AUDIT.md in this order).
 const char* const kLoopNoExit = "loop-no-exit";
 const char* const kLoopPolls = "loop-polls-without-wait";
+const char* const kLoopPollsUnbounded = "loop-polls-unbounded";
+const char* const kLatentInInit = "latent-call-in-init-event";
+const char* const kCellEventLinkedRef = "cell-event-calls-linked-ref";
+const char* const kInventoryUnfiltered = "inventory-event-unfiltered";
+const char* const kEventCallsQuest = "event-calls-quest-per-actor";
 const char* const kUpdateNeverUnregistered = "update-never-unregistered";
 const char* const kOnUpdateRearms = "onupdate-reregisters-unconditionally";
 const char* const kUpdateIntervalShort = "update-interval-too-short";
@@ -63,20 +68,47 @@ const char* const kArrayOffByOne = "array-index-off-by-one";
 const char* const kGotoStateUnknown = "gotostate-unknown";
 const char* const kArrayNone = "array-none";
 
+// Two groups, in the order the summary prints them: first what leaves threads
+// in the save or starves the VM (what the save-game corpus shows), then what
+// gives wrong results and fills the log.
 const std::vector<AuditRule> kRules = {
-    {kLoopNoExit, Severity::Error, "a While whose condition nothing in the body can change, with no Return out of it"},
-    {kLoopPolls, Severity::Warning, "a While that waits for state another thread must change, with no call (no Wait) in its body"},
-    {kUpdateNeverUnregistered, Severity::Warning, "RegisterForUpdate / RegisterForUpdateGameTime with no matching Unregister anywhere in the script"},
-    {kOnUpdateRearms, Severity::Info, "OnUpdate re-registers itself outside any If, in a script that never leaves the state or unregisters"},
-    {kUpdateIntervalShort, Severity::Warning, "RegisterForUpdate / RegisterForSingleUpdate with a literal interval under 0.1 s"},
-    {kWaitInOnUpdate, Severity::Info, "Utility.Wait (or WaitMenuMode / WaitGameTime) inside OnUpdate"},
-    {kNoneDeref, Severity::Warning, "a call or property access on the result of a function that returns None in ordinary situations, with no check before it"},
-    {kRecursionUnconditional, Severity::Error, "a function that calls itself outside any If or While"},
-    {kRecursion, Severity::Info, "a function that calls itself"},
-    {kArrayOffByOne, Severity::Error, "a loop that indexes an array up to and including its Length"},
-    {kGotoStateUnknown, Severity::Error, "GotoState to a state neither the script nor its ancestors declare"},
-    {kArrayNone, Severity::Error, "an array indexed before anything creates it"},
+    {kLoopNoExit, Severity::Error, "threads", "a While whose condition nothing in the body can change, with no Return out of it"},
+    {kLoopPolls, Severity::Warning, "threads", "a While that waits for state another thread must change, with no call (no Wait) in its body"},
+    {kLoopPollsUnbounded, Severity::Warning, "threads", "a While that waits with Utility.Wait for state outside the function, with no attempt limit (info on single-instance script types)"},
+    {kUpdateNeverUnregistered, Severity::Warning, "threads", "RegisterForUpdate / RegisterForUpdateGameTime with no matching Unregister anywhere in the script"},
+    {kOnUpdateRearms, Severity::Info, "threads", "OnUpdate re-registers itself outside any If, in a script that never leaves the state or unregisters"},
+    {kUpdateIntervalShort, Severity::Warning, "threads", "RegisterForUpdate / RegisterForSingleUpdate with a literal interval under 0.1 s"},
+    {kWaitInOnUpdate, Severity::Info, "threads", "Utility.Wait (or WaitMenuMode / WaitGameTime) inside OnUpdate"},
+    {kLatentInInit, Severity::Info, "threads", "a latent call (Wait, SetStage, MoveTo, Enable, ...) in OnInit / OnLoad / OnCellAttach of a script type attached to many objects"},
+    {kCellEventLinkedRef, Severity::Info, "threads", "OnCellAttach / OnLoad calling into a linked reference: every reference in the cell calls the same object at once"},
+    {kInventoryUnfiltered, Severity::Warning, "threads", "OnItemAdded / OnItemRemoved that does work, in a script that never calls AddInventoryEventFilter: one thread per item moved"},
+    {kEventCallsQuest, Severity::Info, "threads", "a per-item or per-actor event (OnItemAdded, OnDeath, OnHit, ...) calling into a quest script: every instance queues on the quest's lock"},
+    {kRecursionUnconditional, Severity::Error, "threads", "a function that calls itself outside any If or While"},
+    {kRecursion, Severity::Info, "threads", "a function that calls itself"},
+    {kNoneDeref, Severity::Warning, "results", "a call or property access on the result of a function that returns None in ordinary situations, with no check before it"},
+    {kArrayNone, Severity::Error, "results", "an array indexed before anything creates it"},
+    {kArrayOffByOne, Severity::Error, "results", "a loop that indexes an array up to and including its Length"},
+    {kGotoStateUnknown, Severity::Error, "results", "GotoState to a state neither the script nor its ancestors declare"},
 };
+
+// Natives that park the thread until the game thread answers (latent), by
+// lowercased name. Kept by hand; docs/AUDIT.md lists it.
+const char* const kLatentMethods[] = {
+    "setstage", "setcurrentstageid", "setobjectivedisplayed", "setobjectivecompleted", "setobjectivefailed", "start", "stop", "reset",
+    "moveto", "movetomyeditorlocation", "movetonode", "movetointeractionlocation", "enable", "disable", "delete", "placeatme",
+    "placeactoratme", "activate", "playanimationandwait", "playgamebryoanimation", "waitforanimationevent", "translateto",
+    "translatetoref", "splinetranslateto", "splinetranslatetoref", "splinetranslatetorefnode", "pushactoraway", "setposition", "setangle",
+    "removeallitems", "resurrect", "kill", "startcombat", "evaluatepackage", "sendassaultalarm", "setscale", "setmotiontype",
+};
+bool is_latent_method(std::string_view lowerName) {
+    for (const char* n : kLatentMethods) {
+        if (lowerName == n) return true;
+    }
+    return false;
+}
+bool is_wait_call(const Expr& e, std::string_view cls, std::string_view name) {
+    return eq_ci(cls, "utility") && (eq_ci(name, "wait") || eq_ci(name, "waitmenumode") || eq_ci(name, "waitgametime")) && e.kind == ExprKind::Call;
+}
 
 Severity severity_of(const char* rule) {
     for (const AuditRule& r : kRules) {
@@ -208,6 +240,8 @@ struct Ctx {
     std::set<StrIdx> assignedVars;          // Var slots assigned anywhere
     std::set<std::string> states;           // lowercased, own and inherited
     std::set<std::string> stateFlags;       // lowercased literals compared with GetState()
+    std::set<StrIdx> linkedSlots;           // variables / autovars assigned from GetLinkedRef anywhere in the script
+    std::set<std::string> latentFunctions;  // lowercased names of this script's functions that make a latent call (transitively)
     bool statesComplete = true;             // false when an ancestor could not be resolved
 
     Ctx(const Script& script, const AuditOptions& o) : s(script), opt(o) {}
@@ -219,19 +253,45 @@ struct Ctx {
         return v.dbg->lines[ip];
     }
 
-    void report(const FnView& v, size_t ip, const char* rule, std::string message) {
+    void report(const FnView& v, size_t ip, const char* rule, std::string message, Severity* override = nullptr) {
         Finding f;
         f.object = std::string(str(v.o->name));
         f.state = v.st ? std::string(str(v.st->name)) : std::string();
         f.function = v.name;
         f.ip = static_cast<uint32_t>(ip);
         f.line = line_of(v, ip);
-        f.severity = severity_of(rule);
+        f.severity = override ? *override : severity_of(rule);
         f.rule = rule;
         f.message = std::move(message);
         out.push_back(std::move(f));
     }
 };
+
+// True for script types the game attaches to many objects at once
+// (ObjectReference, Actor, ActiveMagicEffect and everything derived from them),
+// where one thread per instance becomes hundreds of threads in a cell. Quest,
+// alias and form scripts have one instance each. Decided from the parent
+// chain through the resolver; without one, from the direct parent's name.
+bool many_instance_type(const FnContext& fc) {
+    auto is_many = [](const std::string& t) {
+        return t == "objectreference" || t == "actor" || t == "activemagiceffect";
+    };
+    if (is_many(fc.objectType)) return true;
+    const std::string parent = lower(fc.s.str(fc.o.parent));
+    if (is_many(parent)) return true;
+    for (const std::string& a : fc.ancestors_of(fc.objectType)) {
+        if (is_many(a)) return true;
+    }
+    return false;
+}
+
+bool is_init_event(const FnView& v) {
+    return v.lowerName == "oninit" || v.lowerName == "onload" || v.lowerName == "oncellattach" || v.lowerName == "oncellload" ||
+           v.lowerName == "onattachedtocell";
+}
+bool is_cell_event(const FnView& v) {
+    return v.lowerName == "onload" || v.lowerName == "oncellattach" || v.lowerName == "oncellload" || v.lowerName == "onattachedtocell";
+}
 
 // The debug record of a function. Only the first function of a state block
 // carries the state label (docs/COMPILER_PATTERNS.md), so fall back to any
@@ -399,7 +459,161 @@ void rule_loops(Ctx& c, const FnView& v, const FnContext& fc) {
             c.report(v, st.ip, kLoopNoExit, "This loop can never end: nothing in its body changes what the condition reads, and nothing returns out of it.");
         } else if (!contains_call(st.body)) {
             c.report(v, st.ip, kLoopPolls, "This loop waits for something outside the function by spinning: its body makes no call, so it never yields; put Utility.Wait in the body or react to an event instead.");
+        } else {
+            // A poll with Utility.Wait: fine while whatever it waits for
+            // arrives; unbounded when no local or parameter takes part in the
+            // condition (nothing counts the attempts), so a state that never
+            // comes leaves one thread per instance in the save forever
+            // (CWFieldCOCrimeFactionScript.OnInit: 21,517 threads in 788 saves
+            // of the corpus).
+            bool hasWait = false;
+            each_expr_in(st.body, [&](const Expr& e) {
+                if (e.kind == ExprKind::Call && e.call == CallKind::Static && is_wait_call(e, c.str(e.cls), c.str(e.name))) hasWait = true;
+            });
+            bool anyLocalInCond = false;
+            for (StrIdx n : condVars) {
+                if (is_local_or_param(fc, n)) anyLocalInCond = true;
+            }
+            if (!hasWait || anyLocalInCond) return;
+            // A counter the body increments but nothing reads: the author
+            // meant a limit and never applied it.
+            std::string counter;
+            for (StrIdx a : assigned) {
+                if (!is_local_or_param(fc, a)) continue;
+                // Reads of the slot (an assignment's own target is not one);
+                // `x += 1` reads x once per write, anything beyond that is real.
+                size_t reads = 0, writes = 0;
+                each_stmt(v.stmts, 0, [&](const Stmt& s2, int) {
+                    const bool plainTarget = s2.kind == StmtKind::Assign && s2.lhs && s2.lhs->kind == ExprKind::Var;
+                    if (plainTarget && s2.lhs->name == a) ++writes;
+                    if (s2.lhs && !plainTarget) each_expr(*s2.lhs, [&](const Expr& e) { if (e.kind == ExprKind::Var && e.name == a) ++reads; });
+                    if (s2.rhs) each_expr(*s2.rhs, [&](const Expr& e) { if (e.kind == ExprKind::Var && e.name == a) ++reads; });
+                });
+                if (reads <= writes) counter = fc.display_name(a);
+            }
+            // Who owns what the loop waits for? A flag of this script, or a
+            // call on self, is the author's own off switch (vanilla's
+            // `While isActive && !breakLoop` update loops): info. Only
+            // another object's state (`CWs.Init`, `myQuest.GetStage()`) with
+            // no own flag beside it is a wait on something the script does
+            // not control: warning on many-instance types.
+            bool ownState = false, otherState = false;
+            each_expr(cond, [&](const Expr& e) {
+                if (e.kind == ExprKind::Var && !is_local_or_param(fc, e.name) && !fc.is_self(e.name)) ownState = true;
+                if ((e.kind == ExprKind::PropGet || (e.kind == ExprKind::Call && e.call == CallKind::Method)) && !e.kids.empty()) {
+                    if (is_self_var(*e.kids[0], fc)) ownState = true;
+                    else otherState = true;
+                }
+                if (e.kind == ExprKind::Call && e.call == CallKind::Static) otherState = true;
+            });
+            const bool many = many_instance_type(fc);
+            Severity sev = (many && otherState && !ownState) ? Severity::Warning : Severity::Info;
+            std::string msg = "This loop waits with Utility.Wait for something outside the function and nothing limits the attempts";
+            if (!counter.empty()) msg += " (" + counter + " counts them but is never used to stop)";
+            if (sev == Severity::Warning)
+                msg += "; what it waits for belongs to another object, and one thread per instance stays in the save for as long as that never comes; add a limit or react to an event.";
+            else
+                msg += "; if the state never comes the thread stays in the save; add a limit or react to an event.";
+            c.report(v, st.ip, kLoopPollsUnbounded, msg, &sev);
         }
+    });
+}
+
+// Events the game raises once per item, per actor or per hit: a burst of
+// threads during a bulk transfer, a battle, a cell load.
+bool is_burst_event(const FnView& v) {
+    static const char* const names[] = {"onitemadded", "onitemremoved", "oncontainerchanged", "ondeath", "ondying", "onhit",
+                                        "oncellattach", "oncellload", "onload", "onattachedtocell", "onmagiceffectapply"};
+    for (const char* n : names) {
+        if (v.lowerName == n) return true;
+    }
+    return false;
+}
+
+// True when the lowercased type is a quest script (Quest or derived).
+bool is_quest_type(const FnContext& fc, const std::string& type) {
+    if (type.empty()) return false;
+    if (type == "quest") return true;
+    for (const std::string& a : fc.ancestors_of(type)) {
+        if (a == "quest") return true;
+    }
+    return false;
+}
+
+// inventory-event-unfiltered, event-calls-quest-per-actor.
+void rule_burst_events(Ctx& c, const FnView& v, const FnContext& fc) {
+    const bool inventory = v.lowerName == "onitemadded" || v.lowerName == "onitemremoved";
+    const bool alias = fc.is_subtype(fc.objectType, "referencealias") || lower(fc.s.str(fc.o.parent)) == "referencealias";
+    if (inventory && !c.anyCalls.count("addinventoryeventfilter") && !c.anyCalls.count("addallinventoryeventfilters") && contains_call(v.stmts)) {
+        // On the player's alias every item the player ever touches raises it:
+        // warning. On a container or an actor the burst is bounded by that
+        // inventory: info.
+        Severity sev = alias ? Severity::Warning : Severity::Info;
+        c.report(v, v.stmts.empty() ? 0 : v.stmts.front()->ip, kInventoryUnfiltered,
+                 v.name + " runs once for every item type that moves, and this script never narrows it with AddInventoryEventFilter; a bulk transfer starts one thread per item, all waiting on whatever this handler calls. Filter to the forms you care about, or do the work from one place.",
+                 &sev);
+    }
+    if (!is_burst_event(v)) return;
+    const bool manyThreads = many_instance_type(fc) || inventory || alias;
+    if (!manyThreads) return;
+    bool done = false;
+    each_expr_in(v.stmts, [&](const Expr& e) {
+        if (done || e.kind != ExprKind::Call || e.call != CallKind::Method || e.kids.empty()) return;
+        const Expr& obj = strip_casts(*e.kids[0]);
+        if (is_self_var(obj, fc)) return;
+        std::string type = obj.type;
+        if (type.empty() && obj.kind == ExprKind::Var) type = fc.type_of(obj.name);
+        if (!is_quest_type(fc, type)) return;
+        done = true;
+        c.report(v, e.ip, kEventCallsQuest,
+                 v.name + " calls " + std::string(c.str(e.name)) + " on a quest script; every instance that gets this event queues on that quest's lock, and a burst of them (a bulk transfer, a battle, a cell load) parks them all. Keep the handler to a filter and a flag, and let the quest do the work once.");
+    });
+}
+
+// latent-call-in-init-event, cell-event-calls-linked-ref.
+void rule_init_events(Ctx& c, const FnView& v, const FnContext& fc) {
+    if (!is_init_event(v) || !many_instance_type(fc)) return;
+    bool latentDone = false;
+    std::set<StrIdx> linked = c.linkedSlots;  // slots holding a GetLinkedRef result (this function or anywhere in the script)
+    bool linkedDone = false;
+    each_stmt(v.stmts, 0, [&](const Stmt& st, int) {
+        if (st.kind == StmtKind::Assign && st.lhs && st.lhs->kind == ExprKind::Var && st.rhs) {
+            const Expr& r = strip_casts(*st.rhs);
+            if (r.kind == ExprKind::Call && (eq_ci(c.str(r.name), "getlinkedref") || eq_ci(c.str(r.name), "getnthlinkedref"))) linked.insert(st.lhs->name);
+            else linked.erase(st.lhs->name);
+        }
+        auto visit = [&](const Expr& root) {
+            each_expr(root, [&](const Expr& e) {
+                if (e.kind != ExprKind::Call) return;
+                const std::string name = lower(c.str(e.name));
+                if (!latentDone) {
+                    const bool latent = (e.call == CallKind::Static && is_wait_call(e, c.str(e.cls), c.str(e.name))) ||
+                                        (e.call != CallKind::Static && is_latent_method(name));
+                    // A call to one of this script's own functions that makes a
+                    // latent call somewhere inside (OnCellAttach -> TriggerSetup -> Wait).
+                    const bool viaOwn = e.call == CallKind::Method && !e.kids.empty() && is_self_var(*e.kids[0], fc) && c.latentFunctions.count(name);
+                    if (latent || viaOwn) {
+                        latentDone = true;
+                        c.report(v, e.ip, kLatentInInit,
+                                 v.name + " runs once per object this script is attached to, and " + std::string(c.str(e.name)) +
+                                     (viaOwn ? " ends in a call that parks each thread until the game thread answers" : " parks each thread until the game thread answers") +
+                                     "; when a cell attaches, every instance queues up at once. Keep the event short and do the latent work from one place.");
+                    }
+                }
+                if (!linkedDone && is_cell_event(v) && e.call == CallKind::Method && !e.kids.empty()) {
+                    const Expr& b = strip_casts(*e.kids[0]);
+                    const bool viaLinked = (b.kind == ExprKind::Var && linked.count(b.name)) ||
+                                           (b.kind == ExprKind::Call && (eq_ci(c.str(b.name), "getlinkedref") || eq_ci(c.str(b.name), "getnthlinkedref")));
+                    if (viaLinked) {
+                        linkedDone = true;
+                        c.report(v, e.ip, kCellEventLinkedRef,
+                                 v.name + " calls " + std::string(c.str(e.name)) + " on a linked reference: every reference in the cell that carries this script calls into the same object at the same moment; let the linked object do the work once, or stagger it.");
+                    }
+                }
+            });
+        };
+        if (st.lhs) visit(*st.lhs);
+        if (st.rhs) visit(*st.rhs);
     });
 }
 
@@ -736,6 +950,32 @@ void rule_array_none(Ctx& c, const FnView& v, const FnContext& fc) {
     walk(v.stmts);
 }
 
+// Does function `name` of another script type end in a latent call? Scans the
+// callee's instructions (no lifting), following its own self calls `depth`
+// levels down. Conservative: an unresolvable type or function is not latent.
+bool foreign_function_is_latent(const FnContext& fc, const std::string& type, const std::string& lowerName, int depth) {
+    if (depth <= 0) return false;
+    const FnContext::FoundFunction found = fc.find_function(type, lowerName);
+    if (!found.script || !found.function) return false;
+    const Script& fs = *found.script;
+    for (const Instruction& ins : found.function->code) {
+        if (ins.op == Opcode::CallStatic && ins.args.size() >= 2 && ins.args[0].is_string_ref() && ins.args[1].is_string_ref()) {
+            if (eq_ci(fs.str(ins.args[0].str()), "utility")) {
+                const std::string_view n = fs.str(ins.args[1].str());
+                if (eq_ci(n, "wait") || eq_ci(n, "waitmenumode") || eq_ci(n, "waitgametime")) return true;
+            }
+        } else if ((ins.op == Opcode::CallMethod || ins.op == Opcode::CallParent) && !ins.args.empty() && ins.args[0].is_string_ref()) {
+            const std::string n = lower(fs.str(ins.args[0].str()));
+            if (is_latent_method(n)) return true;
+            // A self call inside the callee: one more level down the same type.
+            if (ins.op == Opcode::CallMethod && ins.args.size() >= 2 && ins.args[1].type == ValueType::Identifier && eq_ci(fs.str(ins.args[1].str()), "self") &&
+                foreign_function_is_latent(fc, type, n, depth - 1))
+                return true;
+        }
+    }
+    return false;
+}
+
 // --- driver -------------------------------------------------------------------
 
 void collect_states(Ctx& c, const Object& o) {
@@ -822,14 +1062,61 @@ AuditResult audit(const Script& s, const AuditOptions& opt) {
             }
         });
         each_stmt(v.stmts, 0, [&](const Stmt& st, int) {
-            if (st.kind == StmtKind::Assign && st.lhs && st.lhs->kind == ExprKind::Var) c.assignedVars.insert(st.lhs->name);
+            if (st.kind == StmtKind::Assign && st.lhs && st.lhs->kind == ExprKind::Var) {
+                c.assignedVars.insert(st.lhs->name);
+                if (st.rhs && !is_local_or_param(fc, st.lhs->name)) {
+                    const Expr& r = strip_casts(*st.rhs);
+                    if (r.kind == ExprKind::Call && (eq_ci(c.str(r.name), "getlinkedref") || eq_ci(c.str(r.name), "getnthlinkedref"))) c.linkedSlots.insert(st.lhs->name);
+                }
+            }
         });
+    }
+    // Which of the script's own functions end in a latent call, directly,
+    // through other own functions, or through a call into another script's
+    // function (WeaponRackTriggerSCRIPT.OnCellAttach -> TriggerSetup ->
+    // ActivatorScript.ActivatorSetup -> Utility.Wait): a fixpoint over self
+    // calls, with other scripts' functions scanned at the instruction level
+    // through the resolver, two levels deep.
+    {
+        std::map<std::string, std::set<std::string>> ownCalls;  // function -> own functions it calls
+        for (const FnView& v : c.fns) {
+            FnContext fc(s, *v.o, *v.f, opt.resolver);
+            const std::string me = lower(v.name);
+            each_expr_in(v.stmts, [&](const Expr& e) {
+                if (e.kind != ExprKind::Call) return;
+                const std::string n = lower(c.str(e.name));
+                if (e.call == CallKind::Static && is_wait_call(e, c.str(e.cls), c.str(e.name))) c.latentFunctions.insert(me);
+                else if (e.call != CallKind::Static && is_latent_method(n)) c.latentFunctions.insert(me);
+                else if (e.call == CallKind::Method && !e.kids.empty() && is_self_var(*e.kids[0], fc)) ownCalls[me].insert(n);
+                else if (e.call == CallKind::Method && !e.kids.empty() && opt.resolver && !c.latentFunctions.count(me)) {
+                    const Expr& obj = strip_casts(*e.kids[0]);
+                    std::string type = obj.type;
+                    if (type.empty() && obj.kind == ExprKind::Var) type = fc.type_of(obj.name);
+                    if (!type.empty() && foreign_function_is_latent(fc, type, n, 2)) c.latentFunctions.insert(me);
+                }
+            });
+        }
+        for (bool changed = true; changed;) {
+            changed = false;
+            for (const auto& [fn, callees] : ownCalls) {
+                if (c.latentFunctions.count(fn)) continue;
+                for (const std::string& callee : callees) {
+                    if (c.latentFunctions.count(callee)) {
+                        c.latentFunctions.insert(fn);
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     // 3. Rules.
     for (const FnView& v : c.fns) {
         FnContext fc(s, *v.o, *v.f, opt.resolver);
         rule_loops(c, v, fc);
+        rule_init_events(c, v, fc);
+        rule_burst_events(c, v, fc);
         rule_array_length_index(c, v, fc);
         rule_on_update(c, v, fc);
         rule_update_interval(c, v);

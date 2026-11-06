@@ -45,19 +45,27 @@ script on a modded machine, and the numbers are in the docs. What it does:
    `patch --map` renumbers them in the compiled file, `closure` tells whether
    everything a script needs is present before anyone tries to compile it,
    `deps` says what a script needs an extender for.
-6. **A script auditor** (`pex audit`): twelve rules over the decompiler's
-   view of a script that tell authors where it can misbehave at run time:
-   loops that cannot end or spin without a `Wait`, update timers never
-   unregistered or re-armed without a stop, calls on results that can be None
-   (`GetFormFromFile` first of all), recursion, arrays used before they
-   exist, `GotoState` to a state that does not exist. Grounded in what the
-   save games and the Papyrus logs on this machine actually show, and
-   measured: 168 findings in 119 of the 14,026 vanilla scripts (every class
-   inspected, Bethesda's own spin loops and undeclared states among them),
-   3,428 in 1,066 of the 73,690 scripts the game would load from the modded
-   folder (the winning copy of each; `--all-copies` audits all 77,047 files:
-   3,815 in 1,215), in 1.1 s.
-   [docs/AUDIT.md](docs/AUDIT.md) explains every rule in plain language.
+6. **A script auditor** (`pex audit`): seventeen rules over the decompiler's
+   view of a script that tell authors where it can misbehave at run time,
+   in two groups. Threads that never end or pile up: loops that cannot end,
+   spin without a `Wait`, or poll another object's state with no bound; update
+   timers never unregistered or re-armed without a stop; latent work and
+   linked-reference calls in events that fire for every object in a cell;
+   unfiltered inventory handlers; events calling into one quest per actor or
+   item; recursion. Wrong results: calls on values that can be None
+   (`GetFormFromFile` first of all), arrays used before they exist,
+   off-by-one array loops, `GotoState` to a state that does not exist. The
+   rules are grounded in a corpus of 3,783 community save games read with
+   ReSaver (`tools/resaver`), in the author's own saves and Papyrus logs, and
+   measured: 1,258 findings in 953 of the 14,026 vanilla scripts, 139 of them
+   warnings or errors (every class inspected: Bethesda's own spin loops,
+   undeclared states and the weapon racks' cell events among them); 6,916 in
+   3,607 of the 73,690 distinct scripts of the modded folder, in 2.7 s; and
+   against the save corpus the rules fire in 8 of the test rig's 40 most
+   frequent stuck entry functions and 19 of a real playthrough's 40, in the
+   function itself, while staying silent on the entries that merely run once
+   per save. [docs/AUDIT.md](docs/AUDIT.md) explains every rule in plain
+   language.
 
 ## Use
 

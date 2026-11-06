@@ -1519,9 +1519,14 @@ int cmd_audit(int argc, char** argv) {
     }
     if (!o.json && !o.csv && !byRule.empty()) {
         std::fputs("\nfindings by rule (count, scripts):\n", stdout);
+        std::string group;
         for (const pex::AuditRule& rule : pex::audit_rules()) {
             auto it = byRule.find(rule.id);
             if (it == byRule.end()) continue;
+            if (rule.group != group) {
+                group = rule.group;
+                std::fprintf(stdout, " %s\n", group == "threads" ? "threads that never end or pile up:" : "wrong results, log errors:");
+            }
             std::fprintf(stdout, "  %-38s %-8s %7zu %7zu\n", rule.id.c_str(), pex::to_string(rule.severity), it->second.findings, it->second.scripts);
         }
     }

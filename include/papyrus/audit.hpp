@@ -36,7 +36,8 @@ struct Finding {
 
 struct AuditRule {
     std::string id;
-    Severity severity;
+    Severity severity;      // the usual severity; a finding may carry a lower one
+    std::string group;      // "threads" (threads that never end or pile up) or "results" (wrong results, log errors)
     std::string summary;    // one line, for `pex audit --rules`
 };
 

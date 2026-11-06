@@ -1150,7 +1150,17 @@ EndEvent
     r.sources["form"] = "Scriptname Form extends ScriptObject\n";
     r.sources["objectreference"] = R"(Scriptname ObjectReference extends Form
 Location Function GetCurrentLocation() native
+ObjectReference Function GetLinkedRef() native
+bool Function IsEnabled() native
+Function Enable(bool abFadeIn = false) native
+Function AddInventoryEventFilter(Form akFilter) native
 Event OnActivate(ObjectReference akActionRef)
+EndEvent
+Event OnItemAdded(Form akBaseItem, int aiItemCount, ObjectReference akItemReference, ObjectReference akSourceContainer)
+EndEvent
+Event OnLoad()
+EndEvent
+Event OnCellAttach()
 EndEvent
 )";
     r.sources["location"] = "Scriptname Location extends Form\nbool Function IsCleared() native\n";
@@ -1164,6 +1174,11 @@ Int[] neverCreated
 Form[] created
 Bool done
 Int counter
+Quest Property Tracker Auto
+
+Event OnItemAdded(Form akBaseItem, Int aiItemCount, ObjectReference akItemReference, ObjectReference akSourceContainer)
+    Tracker.Start()
+EndEvent
 
 Function LoopNoExit(Int n)
     While n > 0
@@ -1183,10 +1198,31 @@ Function LoopPolls()
 EndFunction
 
 Function LoopPollsWithWait()
+    Int tries
     While !done
         Utility.Wait(1.0)
+        tries += 1
     EndWhile
 EndFunction
+
+Function PollBounded()
+    Int tries
+    While !done && tries < 10
+        Utility.Wait(1.0)
+        tries += 1
+    EndWhile
+EndFunction
+
+Event OnLoad()
+    Utility.Wait(1.0)
+EndEvent
+
+Event OnCellAttach()
+    ObjectReference marker = GetLinkedRef()
+    If marker.IsEnabled()
+        done = True
+    EndIf
+EndEvent
 
 Function Forever()
     While True
@@ -1284,6 +1320,14 @@ EndState
 Event OnUpdate()
     RegisterForSingleUpdate(1.0)
 EndEvent
+
+Event OnInit()
+    AddInventoryEventFilter(None)
+EndEvent
+
+Event OnItemAdded(Form akBaseItem, Int aiItemCount, ObjectReference akItemReference, ObjectReference akSourceContainer)
+    GotoState("Busy")
+EndEvent
 )";
 
     struct Resolver : ScriptResolver {
@@ -1324,8 +1368,15 @@ EndEvent
     CHECK(has(a, "LoopNoExit", "loop-no-exit"));
     CHECK(count(a, "LoopCounted") == 0);
     CHECK(has(a, "LoopPolls", "loop-polls-without-wait"));
-    CHECK(count(a, "LoopPollsWithWait") == 0);
+    CHECK(has(a, "LoopPollsWithWait", "loop-polls-unbounded"));
+    CHECK(!has(a, "LoopPollsWithWait", "loop-polls-without-wait"));
+    CHECK(count(a, "PollBounded") == 0);
+    CHECK(has(a, "OnLoad", "latent-call-in-init-event"));
+    CHECK(has(a, "OnCellAttach", "cell-event-calls-linked-ref"));
+    CHECK(!has(a, "OnCellAttach", "latent-call-in-init-event"));
     CHECK(count(a, "Forever") == 0);
+    CHECK(has(a, "OnItemAdded", "inventory-event-unfiltered"));
+    CHECK(has(a, "OnItemAdded", "event-calls-quest-per-actor"));
     CHECK(has(a, "OnInit", "update-interval-too-short"));
     CHECK(has(a, "OnInit", "update-never-unregistered"));
     CHECK(has(a, "OnUpdate", "wait-in-onupdate"));
