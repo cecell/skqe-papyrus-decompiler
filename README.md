@@ -78,6 +78,13 @@ script on a modded machine, and the numbers are in the docs. What it does:
    script), 0.1 s; and on 308 pairs of mod scripts from the Vortex staging
    folder. [docs/DIFF.md](docs/DIFF.md) has the sentences and the numbers.
 
+## Download
+
+Get `pex-<version>.zip` from [Nexus Mods](https://www.nexusmods.com/skyrimspecialedition/mods/198554)
+or the [releases page](https://github.com/cecell/skqe-papyrus-decompiler/releases), unzip it anywhere
+and run `pex.exe` from a command prompt. `pex help` lists the commands. It needs no installer, no
+runtime and no Creation Kit.
+
 ## Use
 
 ```cpp
@@ -213,6 +220,21 @@ build.cmd [Debug|Release]
 
 MSVC 14.44 (pinned by the script), Ninja, CMake 3.21+. Unit tests run as part
 of the build. Elsewhere: `cmake -B build && cmake --build build && ctest --test-dir build`.
+
+## Releases
+
+A version tag runs `.github/workflows/release.yml`, which builds, tests, packages, hashes and scans on
+GitHub's runners, publishes the release, and uploads the same zip to Nexus Mods. To release:
+
+1. Set the version in `CMakeLists.txt` and `kVersion` in `include/papyrus/pex.hpp` (the build refuses
+   to configure if they differ).
+2. Add `release_notes/<version>.md`. Its first line and `## ` sections become the Nexus changelog.
+3. Run the corpus checks of [docs/ROUNDTRIP.md](docs/ROUNDTRIP.md) locally; they need the game.
+4. Push to main, then tag: `git tag v<version>` and `git push origin v<version>`.
+
+To check a download, compare it with `SHA256SUMS.txt` on the release: `sha256sum -c SHA256SUMS.txt`,
+or `Get-FileHash <file>` in PowerShell. The release notes on GitHub link each file's VirusTotal report.
+Credits and licences of included work are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Layout
 

@@ -6,3 +6,6 @@ out/
 .vs/
 POST_COMPACT_RESUME.md
 BACKLOG.md
+sessions/
+stage/
+dist/

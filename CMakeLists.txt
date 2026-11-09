@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.21)  # PROJECT_IS_TOP_LEVEL
 project(skqe_papyrus VERSION 0.1.0 LANGUAGES CXX)
 
+# The version above is the one place to change it for a release (release.yml
+# reads it). The library's kVersion must say the same, or nothing configures.
+file(STRINGS include/papyrus/pex.hpp SKQE_PAPYRUS_KVERSION REGEX "kVersion = \"")
+if(NOT SKQE_PAPYRUS_KVERSION MATCHES "\"${PROJECT_VERSION}\"")
+    message(FATAL_ERROR "kVersion in include/papyrus/pex.hpp is not ${PROJECT_VERSION}, the version in CMakeLists.txt")
+endif()
+
 option(SKQE_PAPYRUS_BUILD_TOOLS "Build the pex command line program" ${PROJECT_IS_TOP_LEVEL})
 option(SKQE_PAPYRUS_BUILD_TESTS "Build and register the unit tests" ${PROJECT_IS_TOP_LEVEL})
 option(SKQE_PAPYRUS_FUZZ "Build the libFuzzer target pex_fuzz (separate build dir)" OFF)
@@ -52,12 +59,13 @@ if(SKQE_PAPYRUS_BUILD_TOOLS)
     FetchContent_Declare(bsa_reader
         GIT_REPOSITORY https://github.com/cecell/bsa-reader.git
         GIT_TAG bbff0cbc5cd04d39bb3b50c470c579669c027dbf)  # v0.1.1
-    # spf (GPL-3.0, github.com/cecell/skyrim-plugin-format): the load order and
-    # which archives load, for patch --out and winners, so that the rule lives
-    # in one place. Changes go to that repo, then bump this pin. Only the
-    # library is built, not its tool or tests.
+    # spf, the library of Skyrim Query Engine (GPL-3.0,
+    # github.com/cecell/skyrim-query-engine, formerly skyrim-plugin-format): the
+    # load order and which archives load, for patch --out and winners, so that
+    # the rule lives in one place. Changes go to that repo, then bump this pin.
+    # Only the library is built, not its tool or tests.
     FetchContent_Declare(spf
-        GIT_REPOSITORY https://github.com/cecell/skyrim-plugin-format.git
+        GIT_REPOSITORY https://github.com/cecell/skyrim-query-engine.git
         GIT_TAG fb54c31e28c1e4b7957a021b854876c79f38a901
         EXCLUDE_FROM_ALL)
     FetchContent_MakeAvailable(bsa_reader spf)
