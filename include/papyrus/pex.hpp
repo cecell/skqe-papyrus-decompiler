@@ -24,7 +24,7 @@
 
 namespace papyrus::pex {
 
-inline constexpr const char* kVersion = "0.1.0";
+inline constexpr const char* kVersion = "0.90";
 
 enum class Status {
     Ok = 0,

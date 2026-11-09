@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Uploads a release to the Nexus Mods page, as the last step of .github/workflows/release.yml.
 
-    python tools/nexus_release.py --tag v0.1.0 --zip dist/pex-0.1.0.zip --notes notes.md [--dry-run]
+    python tools/nexus_release.py --tag v0.90 --zip dist/pex-0.90.zip --notes notes.md [--dry-run]
 
 The first upload creates the file on the page; later ones add a version of it, and the old version
 moves to Old files. The page's version number follows the file. The per-file note is the release's
@@ -104,7 +104,7 @@ def parse_notes(body: str) -> tuple[str, list[str]]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--tag", required=True, help="release tag, e.g. v0.1.0")
+    ap.add_argument("--tag", required=True, help="release tag, e.g. v0.90")
     ap.add_argument("--zip", required=True, type=Path, help="the release zip, uploaded unchanged")
     ap.add_argument("--notes", required=True, type=Path, help="the release notes (Markdown)")
     ap.add_argument("--dry-run", action="store_true", help="read only: show what would be uploaded")

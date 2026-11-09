@@ -1,6 +1,6 @@
 # Build to Nexus in one run.
 #
-#   git tag v0.1.0 && git push origin v0.1.0   build, test, package, hash, scan, publish the GitHub
+#   git tag v0.90 && git push origin v0.90     build, test, package, hash, scan, publish the GitHub
 #                                              release, upload to Nexus Mods (mod 198554)
 #   Actions > Release > Run workflow           the same, stopping before anything is published
 #
