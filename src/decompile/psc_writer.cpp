@@ -372,12 +372,10 @@ private:
     bool is_event(const Function& f, const std::string& name) const {
         if (f.is_global() || f.is_native()) return false;
         // An event never returns a value: a function that does is a function
-        // whatever its name (UIExtensions' OpenMenu, another mod's Register share
-        // names with events of other scripts).
+        // whatever its name (UIExtensions' OpenMenu and other mods' Register
+        // share names with events of other scripts).
         if (lower(m_s.str(f.returnType)) != "none") return false;
-        const std::string n = lower(name);
-        if (is_known_event(n)) return true;
-        return starts_with_ci(n, "on");
+        return is_event_name(lower(name));
     }
 
     void function(const Object& o, const State& st, const NamedFunction& nf, int depth) {

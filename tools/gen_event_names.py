@@ -1,9 +1,12 @@
 """Generates src/decompile/event_names.inc: the names declared with the
 Event keyword in the Papyrus sources given on the command line (directories,
-searched recursively for .psc). Run with the game's Data\\Source\\Scripts and
-Data\\Scripts\\Source (SKSE) folders:
+searched recursively for .psc). Run it on exactly two source sets: the game's
+own sources, unpacked from Data\\Scripts.zip into an empty folder, and SKSE's
+(scripts\\modified in its source). Never on the Source folder of a modded
+install: that would bake the events of whatever mods are installed into the
+table and into every build.
 
-  python tools/gen_event_names.py "<game>\\Data\\Source\\Scripts" "<game>\\Data\\Scripts\\Source"
+  python tools/gen_event_names.py "<unpacked Scripts.zip>" "<skse64>\\scripts\\modified"
 
 The decompiler renders a function as Event when its name is in this set or
 starts with "On" and returns nothing; the choice does not change the compiled

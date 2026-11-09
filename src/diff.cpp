@@ -121,7 +121,7 @@ std::string value_text(const FnContext& fc, const Value& v) {
 // A function the decompiler would print as an Event: an event name with no
 // return type.
 std::string function_word(const Script& s, std::string_view name, const Function& f) {
-    return lower(s.str(f.returnType)) == "none" && is_known_event(lower(name)) ? "Event" : "Function";
+    return lower(s.str(f.returnType)) == "none" && is_event_name(lower(name)) ? "Event" : "Function";
 }
 
 std::string type_text(const Script& s, StrIdx t);
@@ -1647,7 +1647,7 @@ std::string diff_text(const DiffResult& r) {
                 const size_t dot = c.function.find('.');
                 std::string head;
                 if (dot != std::string::npos) head = "Property " + c.function.substr(0, dot) + (c.function.substr(dot) == ".get" ? " getter" : " setter");
-                else head = (detail::is_known_event(detail::FnContext::lower(c.function)) ? "Event " : "Function ") + c.function;
+                else head = (detail::is_event_name(detail::FnContext::lower(c.function)) ? "Event " : "Function ") + c.function;
                 if (!c.state.empty()) head += " (state " + c.state + ")";
                 out += head + ":\n";
             }
