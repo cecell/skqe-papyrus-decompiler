@@ -70,7 +70,7 @@ commands
                                folder) for parent chains and declarations.
                                --optional-objects declares object parameters
                                "= None" (for import sets that must compile
-                               against each other, see docs/ROUNDTRIP.md)
+                               against each other)
   refs [<input>] [--csv] [--callee Name,...] [--plugin Name.esp] [--out <folder>]
                                with no input (or with --out or --load-order),
                                only the copy of each script the game would load,
@@ -99,7 +99,7 @@ commands
                                calls on results that can be None, recursion,
                                off-by-one array loops, GotoState to a state
                                that does not exist, arrays used before they
-                               exist (docs/AUDIT.md). One line per finding
+                               exist. One line per finding
                                with file, function, source line, rule and
                                advice; a summary by rule at the end (--quiet:
                                the summary alone). --rules lists the rules.
@@ -124,7 +124,7 @@ commands
                                Byte-identical and canonically equal files
                                say so in one line. --json: one object per
                                script per line. --quiet: the status line of
-                               each script only (docs/DIFF.md)
+                               each script only
   closure <script.pex> --data <Data> [--import <dir;dir>] [--emit <dir>] [--json]
                                walks every script the script needs, through
                                compiled files in --data; reports each as
@@ -159,7 +159,6 @@ commands
                                copies loose files only. --log writes a report by
                                archive and folder; --formid writes one by default
                                next to the input, unless --dry-run
-                               (docs/INTEGRATION.md)
   patch --out <folder> --plugin Name.esp --formid OLD:NEW [--formid ...]
             [<Data>] [--load-order <plugins.txt>] [--all-plugins] [--ini-dir <dir>]
             [--map <FormIDMap> instead of --plugin and --formid]
@@ -167,7 +166,7 @@ commands
                                --update overwrites a copy in <folder> whose source
                                is no longer the winner, or removes it if the new
                                winner has nothing for the plugin to change.
-                               docs/ESLIFY_PRIMER.md. The game is found through
+                               The game is found through
                                the registry, Steam's install, else GOG's, and
                                plugins.txt in %LOCALAPPDATA%\Skyrim Special Edition,
                                or that name plus GOG; if either cannot be found it

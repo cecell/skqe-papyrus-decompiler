@@ -7,5 +7,11 @@ out/
 POST_COMPACT_RESUME.md
 BACKLOG.md
 sessions/
+# Markdown other than the README, the licence notices and the release notes
+# stays local.
+*.md
+!README.md
+!THIRD_PARTY_NOTICES.md
+!release_notes/*.md
 stage/
 dist/

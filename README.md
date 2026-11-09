@@ -7,7 +7,7 @@ of Skyrim LE/SE. GPL-3.0-only. CMake target `skqe::papyrus`, namespace
 archives.
 
 Everything in it is checked against Bethesda's own tools over every compiled
-script on a modded machine, and the numbers are in the docs. What it does:
+script on a modded machine, and the numbers are below. What it does:
 
 1. **Typed model, reader, byte-exact writer.** A `.pex` becomes a
    `papyrus::pex::Script` (header, string table, debug info, user flags,
@@ -29,8 +29,7 @@ script on a modded machine, and the numbers are in the docs. What it does:
    decompile, compile with `PapyrusCompiler.exe`, compare with the original
    at model level: **14,024 of the 14,026 vanilla scripts (99.99%) come back
    identical**, and over the whole modded folder **75,125 of 76,593 (98.08%;
-   99.0% of those whose dependencies exist at all)**; docs/ROUNDTRIP.md
-   explains every class of the rest.
+   99.0% of those whose dependencies exist at all)**.
 4. **A compiler** for Skyrim's Papyrus (`pex compile`), proved by compiling
    every vanilla source and comparing with the shipped compiled file at
    model level: **13,711 of 13,975 (98.1%) come back identical**, in 2.9 s
@@ -39,7 +38,6 @@ script on a modded machine, and the numbers are in the docs. What it does:
    a dependency's source, none differs). Over the two mod source folders of
    the modded `Data` the same holds: 6,101 of 6,883 and 9,373 of 10,168
    identical, none differing from what `PapyrusCompiler.exe` produces today.
-   docs/COMPILER.md and docs/ROUNDTRIP.md say what the rest is.
 5. **The analyses the ESL-compaction tooling needs**, with no compiler
    involved: `refs` lists every FormID literal paired with its plugin name,
    `patch --map` renumbers them in the compiled file, `closure` tells whether
@@ -64,8 +62,7 @@ script on a modded machine, and the numbers are in the docs. What it does:
    against the save corpus the rules fire in 8 of the test rig's 40 most
    frequent stuck entry functions and 19 of a real playthrough's 40, in the
    function itself, while staying silent on the entries that merely run once
-   per save. [docs/AUDIT.md](docs/AUDIT.md) explains every rule in plain
-   language.
+   per save. `pex audit --rules` lists the rules.
 7. **A semantic diff** (`pex diff`): what changed between two versions of a
    script, in plain English and with no AI involved: declarations (a property
    added, a parameter lost, a return type changed), then each function's
@@ -76,7 +73,7 @@ script on a modded machine, and the numbers are in the docs. What it does:
    rather than changed). Measured on every vanilla script the Unofficial
    Patch edits: 1,420 scripts, 1,225 changed, 5,319 sentences (median 2 per
    script), 0.1 s; and on 308 pairs of mod scripts from the Vortex staging
-   folder. [docs/DIFF.md](docs/DIFF.md) has the sentences and the numbers.
+   folder.
 
 ## Download
 
@@ -141,11 +138,11 @@ pex deps <input> [--resolve <Data>] [--vanilla <Misc.bsa>]
 pex diff <old> <new> [--resolve <Data>] [--json] [--quiet]
                                  what changed between two versions of a script
                                  (two files, or two folders or archives matched
-                                 by name), one sentence per change; docs/DIFF.md
+                                 by name), one sentence per change
 pex audit <input> [--resolve <Data>] [--json|--csv] [--rules]
                                  risks for script authors, one line per finding
                                  (file, function, source line, rule, advice) and
-                                 a summary by rule; docs/AUDIT.md
+                                 a summary by rule
 pex closure <script.pex> --data <Data> [--import <dirs>] [--emit <dir>]
 pex patch <input> --plugin <Name.esp> --formid OLD:NEW[,OLD:NEW] [--formids <file>]
                   [--log <file>] [--dry-run] [--backup]
@@ -158,8 +155,7 @@ pex patch <input> --map <FormIDMap> [--log <file>] [--dry-run] [--backup]
                                  if another archive there has a different copy, or
                                  for a shared data block or a rename in an archive;
                                  a log by archive and folder. Refuses to write
-                                 while the game runs, with no override;
-                                 docs/INTEGRATION.md
+                                 while the game runs, with no override
 pex patch --undo <journal> [--dry-run]
                                  restores every byte a journal's patches changed
                                  and deletes what they extracted; a run writes one
@@ -171,8 +167,7 @@ pex patch --out <folder> --plugin <Name.esp> --formid OLD:NEW [--update]
                                  as a mod. Finds the game (Steam, else GOG) through
                                  the registry and plugins.txt in %LOCALAPPDATA%, or
                                  refuses and says why. Output copy, then loose, then the last loaded
-                                 archive; the mode for a whole setup;
-                                 docs/ESLIFY_PRIMER.md, docs/INTEGRATION.md
+                                 archive; the mode for a whole setup
 pex winners [<Data>] [--load-order <plugins.txt>] [--all-plugins]
                                  the copy of each script the game loads, as CSV
 pex check --rewrite <input>      read + write, compare byte for byte
@@ -202,16 +197,6 @@ that run Bethesda's compiler take long because each script is a separate
 compiler run (the whole folder: 72 minutes, of which decompiling is 2);
 nothing in the normal workflow calls a compiler.
 
-## Format notes that matter
-
-[docs/PEX_FORMAT.md](docs/PEX_FORMAT.md), [docs/OPCODES.md](docs/OPCODES.md),
-[docs/ASM_SYNTAX.md](docs/ASM_SYNTAX.md) (including what Bethesda's assembler
-does to a listing) and
-[docs/COMPILER_PATTERNS.md](docs/COMPILER_PATTERNS.md), the last being the
-catalog of how Bethesda's compiler lowers each construct, found by probing
-and by the round trip. It is also the specification a future compiler has to
-meet. [docs/DESIGN.md](docs/DESIGN.md) explains the passes.
-
 ## Build
 
 ```
@@ -229,7 +214,8 @@ GitHub's runners, publishes the release, and uploads the same zip to Nexus Mods.
 1. Set the version in `CMakeLists.txt` and `kVersion` in `include/papyrus/pex.hpp` (the build refuses
    to configure if they differ).
 2. Add `release_notes/<version>.md`. Its first line and `## ` sections become the Nexus changelog.
-3. Run the corpus checks of [docs/ROUNDTRIP.md](docs/ROUNDTRIP.md) locally; they need the game.
+3. Run the corpus checks (`pex check --rewrite`, `--assemble`, `--compile`, `--roundtrip`) locally; they
+   need the game.
 4. Push to main, then tag: `git tag v<version>` and `git push origin v<version>`.
 
 To check a download, compare it with `SHA256SUMS.txt` on the release: `sha256sum -c SHA256SUMS.txt`,
@@ -252,6 +238,4 @@ tools/             pex.cpp (CLI), inputs.hpp, process.hpp, resolver.hpp,
                    the Papyrus VM state of a save game, through ReSaver)
 tests/             unit tests on synthetic scripts, fuzz target
 probes/            Papyrus sources compiled to learn the compiler's patterns
-docs/              format, assembly syntax, compiler catalog, design, round trip
-WISHLIST.md        the request this project answers
 ```

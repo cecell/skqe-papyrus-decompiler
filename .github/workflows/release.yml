@@ -12,7 +12,7 @@
 # the results go in the GitHub release notes and the run summary, and not in the Nexus file note.
 #
 # The unit tests run here. The corpus checks (round trips against Bethesda's tools over every
-# script of a game install) need the game and run locally before a release: docs/ROUNDTRIP.md.
+# script of a game install) need the game and run locally before a release.
 #
 # Secrets: NEXUS_API_KEY, VIRUSTOTAL_API_KEY.
 
@@ -74,7 +74,7 @@ jobs:
         run: |
           $stage = New-Item -ItemType Directory -Force "stage/pex-$env:VERSION"
           Copy-Item build\pex.exe, README.md, LICENSE, THIRD_PARTY_NOTICES.md $stage
-          Copy-Item -Recurse LICENSES, docs $stage
+          Copy-Item -Recurse LICENSES $stage
           $dist = New-Item -ItemType Directory -Force dist
           Compress-Archive -Path "$stage/*" -DestinationPath "dist/pex-$env:VERSION.zip"
           Copy-Item build\pex.exe $dist
