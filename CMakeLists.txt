@@ -58,7 +58,7 @@ if(SKQE_PAPYRUS_BUILD_TOOLS)
     include(FetchContent)
     FetchContent_Declare(bsa_reader
         GIT_REPOSITORY https://github.com/cecell/bsa-reader.git
-        GIT_TAG bbff0cbc5cd04d39bb3b50c470c579669c027dbf)  # v0.1.1
+        GIT_TAG 88e40b4022050d0ea7d850a7804c56dcca58b77f)  # v0.1.1
     # spf, the library of Skyrim Query Engine (GPL-3.0,
     # github.com/cecell/skyrim-query-engine, formerly skyrim-plugin-format): the
     # load order and which archives load, for patch --out and winners, so that
@@ -66,7 +66,7 @@ if(SKQE_PAPYRUS_BUILD_TOOLS)
     # Only the library is built, not its tool or tests.
     FetchContent_Declare(spf
         GIT_REPOSITORY https://github.com/cecell/skyrim-query-engine.git
-        GIT_TAG fb54c31e28c1e4b7957a021b854876c79f38a901
+        GIT_TAG 8f78c3b8e8e027857759da6ab00b7b7b068a0d07  # after its own pins were rewritten; the library target is skqe
         EXCLUDE_FROM_ALL)
     FetchContent_MakeAvailable(bsa_reader spf)
     # spf registers its test ("unit") whether or not it is the top project; it
@@ -77,7 +77,7 @@ if(SKQE_PAPYRUS_BUILD_TOOLS)
     endif()
 
     add_executable(pex tools/pex.cpp tools/archive_patch.cpp tools/out_patch.cpp)
-    target_link_libraries(pex PRIVATE skqe::papyrus bsa::reader spf)
+    target_link_libraries(pex PRIVATE skqe::papyrus bsa::reader skqe)
     if(MSVC)
         target_compile_options(pex PRIVATE /W4 /permissive- /utf-8 /EHsc)
         target_compile_definitions(pex PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -100,7 +100,7 @@ if(SKQE_PAPYRUS_BUILD_TESTS)
     if(SKQE_PAPYRUS_BUILD_TOOLS)
         # Needs bsa-reader, which only the tool links.
         add_executable(skqe_archive_patch_tests tests/test_archive_patch.cpp tools/archive_patch.cpp tools/out_patch.cpp)
-        target_link_libraries(skqe_archive_patch_tests PRIVATE skqe::papyrus bsa::reader spf)
+        target_link_libraries(skqe_archive_patch_tests PRIVATE skqe::papyrus bsa::reader skqe)
         target_include_directories(skqe_archive_patch_tests PRIVATE tools)
         if(MSVC)
             target_compile_options(skqe_archive_patch_tests PRIVATE /W4 /permissive- /utf-8 /EHsc)

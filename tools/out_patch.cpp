@@ -5,8 +5,8 @@
 #include "archive_patch.hpp"
 #include "papyrus/pex.hpp"
 
-#include "asset_build.h"  // spf: PlanArchives
-#include "db_build.h"     // spf: LoadOrder
+#include "asset_build.h"  // skqe: PlanArchives
+#include "db_build.h"     // skqe: LoadOrder
 
 #include <algorithm>
 #include <atomic>
@@ -582,12 +582,12 @@ bool plan_archives(const fs::path& data, const fs::path& pluginsTxt, const std::
         why = "cannot read the load order " + pluginsTxt.u8string();
         return false;
     }
-    spf::BuildOptions lo;
+    skqe::BuildOptions lo;
     lo.data = data.wstring();
     lo.loadOrderFile = pluginsTxt.wstring();
     if (allPlugins) lo.plugins = every_listed_plugin(data, pluginsTxt);
     std::string err;
-    const std::vector<std::string> order = spf::LoadOrder(lo, nullptr, &err);
+    const std::vector<std::string> order = skqe::LoadOrder(lo, nullptr, &err);
     if (!err.empty()) {
         why = "the load order: " + err;
         return false;
@@ -614,9 +614,9 @@ bool plan_archives(const fs::path& data, const fs::path& pluginsTxt, const std::
         if (it->is_regular_file(ec) && iequals_ext(it->path(), ".bsa")) names.push_back(it->path().filename().u8string());
     }
     std::sort(names.begin(), names.end());
-    const std::vector<spf::assets::ArchiveLoad> plan = spf::assets::PlanArchives(names, ini_archives(iniDirs, out.iniSource), order);
+    const std::vector<skqe::assets::ArchiveLoad> plan = skqe::assets::PlanArchives(names, ini_archives(iniDirs, out.iniSource), order);
     std::set<std::string> loadedNames;
-    for (const spf::assets::ArchiveLoad& a : plan) {
+    for (const skqe::assets::ArchiveLoad& a : plan) {
         ArchivePlan::Loaded l;
         l.path = data / fs::u8path(a.name);
         l.rank = a.rank;
