@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)  # PROJECT_IS_TOP_LEVEL
-project(skqe_papyrus VERSION 0.91 LANGUAGES CXX)
+project(skqe_papyrus VERSION 0.92 LANGUAGES CXX)
 
 # The version above is the one place to change it for a release (release.yml
 # reads it). The library's kVersion must say the same, or nothing configures.
