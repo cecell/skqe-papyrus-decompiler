@@ -4,7 +4,8 @@ A C++17 library and command line tool for compiled Papyrus scripts (`.pex`)
 of Skyrim LE/SE. GPL-3.0-only. CMake target `skqe::papyrus`, namespace
 `papyrus::pex`. The library has no dependencies; the tool uses
 [bsa-reader](https://github.com/cecell/bsa-reader) to read scripts out of
-archives.
+archives and the library of [Skyrim Query Engine](https://github.com/cecell/skyrim-query-engine)
+for the load order (which archives the game loads, for `patch --out` and `winners`).
 
 Everything in it is checked against Bethesda's own tools over every compiled
 script on a modded machine, and the numbers are below. What it does:
@@ -12,7 +13,7 @@ script on a modded machine, and the numbers are below. What it does:
 1. **Typed model, reader, byte-exact writer.** A `.pex` becomes a
    `papyrus::pex::Script` (header, string table, debug info, user flags,
    objects with variables, properties, states, functions, instructions).
-   Writing it back reproduces the file byte for byte: 77,031 of 77,033
+   Writing it back reproduces the file byte for byte: 77,064 of 77,066
    scripts in a modded Data folder; the other two are a truncated backup and
    a file that is not a script. Damaged files are refused with a sentence
    naming what was wrong and at which byte; nothing throws.
@@ -38,6 +39,11 @@ script on a modded machine, and the numbers are below. What it does:
    a dependency's source, none differs). Over the two mod source folders of
    the modded `Data` the same holds: 6,101 of 6,883 and 9,373 of 10,168
    identical, none differing from what `PapyrusCompiler.exe` produces today.
+   The header of a compiled script names its source file, a user and a
+   computer; Bethesda's compiler writes the path it was given and the
+   Windows account and machine name there. `pex compile` writes the file
+   name alone and `skqe` / `papyrus`, or whatever `--user` and `--computer`
+   say.
 5. **The analyses the ESL-compaction tooling needs**, with no compiler
    involved: `refs` lists every FormID literal paired with its plugin name,
    `patch --map` renumbers them in the compiled file, `closure` tells whether
@@ -182,7 +188,12 @@ pex check --roundtrip <input> --tools "<game>\Papyrus Compiler" [--resolve <Data
 every `.bsa`) or one `.bsa`. Work is spread over all cores. `pex help` has
 the details.
 
-Speed (modded Data folder, 77,000 scripts, 32 threads, 2026-11-03): parsing
+Speed (modded Data folder, 77,000 scripts, 32 threads, 2026-11-03 unless
+said): decompiling the 67,937 scripts of a Vortex staging folder, loose and
+in archives, 27 s (35 s with the 67,913 source files written; 2026-11-09);
+compiling 21,463 of the 23,144 sources of a game's `Source\Scripts` to disk
+57 s, and `check --compile` over the 13,975 vanilla sources 3.2 s (2026-11-09);
+parsing
 everything for `refs` 3.4 s; byte-exact rewrite check 1.3 s; listing,
 assembling and comparing all 77,000 (`check --assemble`) 2.7 s; decompiling the
 14,026 vanilla scripts to files 6.8 s, of which the decompiler itself is about
@@ -233,7 +244,9 @@ src/               reader, writer, JSON, assembly writer and assembler, canon,
                    layout, analysis, audit (the rules), decompile/ (lift,
                    structure, psc_writer, event_names.inc/.hpp), compile/
                    (lexer, parser, interfaces, lowering, codegen)
-tools/             pex.cpp (CLI), inputs.hpp, process.hpp, resolver.hpp,
+tools/             pex.cpp (CLI), archive_patch.cpp (patching inside archives,
+                   journals, undo), out_patch.cpp (--out folder, load order,
+                   winners), inputs.hpp, process.hpp, resolver.hpp,
                    roundtrip.hpp, gen_event_names.py, resaver/ (DumpStacks:
                    the Papyrus VM state of a save game, through ReSaver)
 tests/             unit tests on synthetic scripts, fuzz target
