@@ -67,6 +67,9 @@ const char* const kRecursion = "recursion";
 const char* const kArrayOffByOne = "array-index-off-by-one";
 const char* const kGotoStateUnknown = "gotostate-unknown";
 const char* const kArrayNone = "array-none";
+const char* const kConditionImpossible = "condition-impossible";
+const char* const kConditionAlwaysTrue = "condition-always-true";
+const char* const kCodeUnreachable = "code-unreachable";
 
 // Two groups, in the order the summary prints them: first what leaves threads
 // in the save or starves the VM (what the save-game corpus shows), then what
@@ -89,6 +92,9 @@ const std::vector<AuditRule> kRules = {
     {kArrayNone, Severity::Error, "results", "an array indexed before anything creates it"},
     {kArrayOffByOne, Severity::Error, "results", "a loop that indexes an array up to and including its Length"},
     {kGotoStateUnknown, Severity::Error, "results", "GotoState to a state neither the script nor its ancestors declare"},
+    {kConditionImpossible, Severity::Warning, "results", "an If, ElseIf or While whose condition can never be true (x == 1 && x == 2, x > 5 && x < 3, an ElseIf an earlier test already covers)"},
+    {kConditionAlwaysTrue, Severity::Warning, "results", "an If or While whose condition is always true (x != 1 || x != 2, x == x)"},
+    {kCodeUnreachable, Severity::Warning, "results", "statements after a Return (or after a While True), or an Else the tests before it leave no value for"},
 };
 
 // Natives that park the thread until the game thread answers (latent), by
@@ -976,6 +982,451 @@ bool foreign_function_is_latent(const FnContext& fc, const std::string& type, co
     return false;
 }
 
+// --- conditions that can never be true, or are always true -----------------------
+
+// A condition is read as a formula over atoms "slot op literal". Only what can
+// be decided from the condition's own text is decided: an atom on anything but
+// a plain variable or an array's Length is unknown, and unknown atoms never
+// make a condition impossible or always true. Literal comparisons follow
+// Papyrus: strings compare without regard to case, None is a value of its own.
+struct Atom {
+    std::string key;     // "v:<slot>" or "len:<slot>"
+    std::string op;      // == != < <= > >=
+    Value val;
+    bool numeric = false;
+    double num = 0;      // when numeric
+    bool isInt = false;  // an Int slot against an Int literal: strict bounds tighten by one
+};
+
+struct Formula {
+    enum class K { Atom, And, Or, Unknown, Const } k = K::Unknown;
+    Atom atom;
+    bool constant = false;
+    bool selfCompare = false;  // Const from comparing a slot with itself
+    std::vector<Formula> parts;
+};
+
+Formula unknown_f() { return Formula{}; }
+Formula const_f(bool b) {
+    Formula f;
+    f.k = Formula::K::Const;
+    f.constant = b;
+    return f;
+}
+
+std::string negate_op(const std::string& op) {
+    if (op == "==") return "!=";
+    if (op == "!=") return "==";
+    if (op == "<") return ">=";
+    if (op == ">=") return "<";
+    if (op == ">") return "<=";
+    return ">";  // "<="
+}
+std::string flip_op(const std::string& op) {  // a op b  ==  b flip(op) a
+    if (op == "<") return ">";
+    if (op == ">") return "<";
+    if (op == "<=") return ">=";
+    if (op == ">=") return "<=";
+    return op;
+}
+
+Formula negate(const Formula& f) {
+    Formula r = f;
+    switch (f.k) {
+    case Formula::K::Atom: r.atom.op = negate_op(f.atom.op); break;
+    case Formula::K::Const: r.constant = !f.constant; break;
+    case Formula::K::And:
+    case Formula::K::Or:
+        r.k = f.k == Formula::K::And ? Formula::K::Or : Formula::K::And;
+        for (Formula& p : r.parts) p = negate(p);
+        break;
+    case Formula::K::Unknown: break;
+    }
+    return r;
+}
+
+// Through the conversions the compiler inserted (Int to Float, a value to
+// Bool for a test). A cast the author wrote, (item as Weapon), changes the
+// value and stays.
+const Expr& strip_implicit(const Expr& e) {
+    const Expr* p = &e;
+    while (p->kind == ExprKind::Cast && p->implicitCast && !p->explicitCast && !p->kids.empty()) p = p->kids[0].get();
+    return *p;
+}
+
+// A literal operand: a literal or a negated number, through casts.
+bool literal_value(const Expr& e, Value& out, double& num, bool& numeric) {
+    const Expr& x = strip_casts(e);
+    if (x.kind == ExprKind::Lit) {
+        out = x.lit;
+        numeric = x.lit.type == ValueType::Integer || x.lit.type == ValueType::Float;
+        num = x.lit.type == ValueType::Integer ? double(x.lit.as_int()) : x.lit.type == ValueType::Float ? double(x.lit.as_float()) : 0;
+        return true;
+    }
+    if (x.kind == ExprKind::Unary && x.op == "-" && !x.kids.empty()) {
+        if (!literal_value(*x.kids[0], out, num, numeric) || !numeric) return false;
+        num = -num;
+        if (out.type == ValueType::Integer) out.bits = static_cast<uint32_t>(-out.as_int());
+        return true;
+    }
+    return false;
+}
+
+// The slot a comparison side reads, when it is one the rule may reason about.
+bool slot_key(const Expr& e, const FnContext& fc, bool callsInCondition, std::string& key, bool& isInt) {
+    const Expr& x = strip_implicit(e);
+    if (x.kind == ExprKind::Var && !fc.is_self(x.name) && !fc.is_nonevar(x.name)) {
+        // A script variable another thread can change while a call in the same
+        // condition has released the script's lock.
+        if (callsInCondition && !is_local_or_param(fc, x.name)) return false;
+        key = "v:" + std::to_string(x.name);
+        isInt = fc.type_of(x.name) == "int";
+        return true;
+    }
+    if (x.kind == ExprKind::ArrayLen && !x.kids.empty()) {
+        const Expr& a = strip_implicit(*x.kids[0]);
+        if (a.kind != ExprKind::Var) return false;
+        if (callsInCondition && !is_local_or_param(fc, a.name)) return false;
+        key = "len:" + std::to_string(a.name);
+        isInt = true;
+        return true;
+    }
+    return false;
+}
+
+Formula to_formula(const Expr& e0, const FnContext& fc, bool calls) {
+    const Expr& e = strip_implicit(e0);
+    if (e.kind == ExprKind::Lit) {
+        if (e.lit.type == ValueType::Bool) return const_f(e.lit.as_bool());
+        if (e.lit.type == ValueType::Integer) return const_f(e.lit.as_int() != 0);
+        return unknown_f();
+    }
+    if (e.kind == ExprKind::And || e.kind == ExprKind::Or) {
+        Formula f;
+        f.k = e.kind == ExprKind::And ? Formula::K::And : Formula::K::Or;
+        for (const ExprPtr& k : e.kids) f.parts.push_back(to_formula(*k, fc, calls));
+        return f;
+    }
+    if (e.kind == ExprKind::Unary && e.op == "!" && !e.kids.empty()) return negate(to_formula(*e.kids[0], fc, calls));
+    // A bare Bool variable: `If x` is `x == True`.
+    if (e.kind == ExprKind::Var) {
+        std::string key;
+        bool isInt = false;
+        if (fc.type_of(e.name) == "bool" && slot_key(e, fc, calls, key, isInt)) {
+            Formula f;
+            f.k = Formula::K::Atom;
+            f.atom.key = key;
+            f.atom.op = "==";
+            f.atom.val.type = ValueType::Bool;
+            f.atom.val.bits = 1;
+            return f;
+        }
+        return unknown_f();
+    }
+    if (e.kind != ExprKind::Binary || e.kids.size() != 2) return unknown_f();
+    static const std::set<std::string> kCmp = {"==", "!=", "<", "<=", ">", ">="};
+    if (!kCmp.count(e.op)) return unknown_f();
+    // The same slot on both sides: x == x is always true, x != x never.
+    {
+        std::string ka, kb;
+        bool ia = false, ib = false;
+        if (slot_key(*e.kids[0], fc, calls, ka, ia) && slot_key(*e.kids[1], fc, calls, kb, ib) && ka == kb) {
+            Formula f = const_f(e.op == "==" || e.op == "<=" || e.op == ">=");
+            f.selfCompare = true;
+            return f;
+        }
+    }
+    for (int side = 0; side < 2; ++side) {
+        std::string key;
+        bool isInt = false;
+        Value v;
+        double num = 0;
+        bool numeric = false;
+        if (!slot_key(*e.kids[side], fc, calls, key, isInt)) continue;
+        if (!literal_value(*e.kids[1 - side], v, num, numeric)) continue;
+        Formula f;
+        f.k = Formula::K::Atom;
+        f.atom.key = key;
+        f.atom.op = side == 0 ? e.op : flip_op(e.op);
+        f.atom.val = v;
+        f.atom.numeric = numeric;
+        f.atom.num = num;
+        f.atom.isInt = isInt && v.type == ValueType::Integer;
+        // Ordering against something that is not a number is left alone.
+        if (!numeric && f.atom.op != "==" && f.atom.op != "!=") return unknown_f();
+        // A Bool slot compared with 0 / 1.
+        const Expr& slot = strip_implicit(*e.kids[side]);
+        if (slot.kind == ExprKind::Var && fc.type_of(slot.name) == "bool" && numeric && (f.atom.op == "==" || f.atom.op == "!=")) {
+            f.atom.val.type = ValueType::Bool;
+            f.atom.val.bits = num != 0 ? 1 : 0;
+            f.atom.numeric = false;
+        }
+        return f;
+    }
+    return unknown_f();
+}
+
+bool same_literal(const Value& a, const Value& b, const Script& s) {
+    const bool an = a.type == ValueType::Integer || a.type == ValueType::Float;
+    const bool bn = b.type == ValueType::Integer || b.type == ValueType::Float;
+    if (an && bn) {
+        const double x = a.type == ValueType::Integer ? a.as_int() : a.as_float();
+        const double y = b.type == ValueType::Integer ? b.as_int() : b.as_float();
+        return x == y;
+    }
+    if (a.type != b.type) return false;
+    if (a.type == ValueType::String) return eq_ci(s.str(a.str()), s.str(b.str()));
+    if (a.type == ValueType::Bool) return a.as_bool() == b.as_bool();
+    if (a.type == ValueType::None) return true;
+    return false;
+}
+
+// Two literals that are certainly different values (same kind, not equal).
+bool surely_different(const Atom& a, const Atom& b, const Script& s) {
+    const bool comparable = a.val.type == b.val.type || (a.numeric && b.numeric);
+    if (!comparable || a.val.type == ValueType::Identifier) return false;
+    return !same_literal(a.val, b.val, s);
+}
+
+// Can every atom about one slot hold at once?
+bool atoms_satisfiable(const std::vector<const Atom*>& as, const Script& s) {
+    std::vector<const Atom*> eqs, nes;
+    double lo = -1e300, hi = 1e300;
+    bool loOpen = false, hiOpen = false, anyBound = false, allInt = true;
+    const bool isLen = !as.empty() && as[0]->key.compare(0, 4, "len:") == 0;
+    if (isLen) {
+        lo = 0;
+        anyBound = true;
+    }
+    for (const Atom* a : as) {
+        if (a->op == "==") {
+            eqs.push_back(a);
+            continue;
+        }
+        if (a->op == "!=") {
+            nes.push_back(a);
+            continue;
+        }
+        anyBound = true;
+        if (!a->isInt) allInt = false;
+        double v = a->num;
+        bool open = a->op == ">" || a->op == "<";
+        if (a->isInt && open) {
+            v += (a->op == ">") ? 1 : -1;
+            open = false;
+        }
+        if (a->op == ">" || a->op == ">=") {
+            if (v > lo || (v == lo && open)) {
+                lo = v;
+                loOpen = open;
+            }
+        } else if (v < hi || (v == hi && open)) {
+            hi = v;
+            hiOpen = open;
+        }
+    }
+    if (anyBound && (lo > hi || (lo == hi && (loOpen || hiOpen)))) return false;
+    for (size_t i = 1; i < eqs.size(); ++i) {
+        if (surely_different(*eqs[0], *eqs[i], s)) return false;
+    }
+    if (!eqs.empty()) {
+        const Atom* p = eqs[0];
+        for (const Atom* n : nes) {
+            if (same_literal(p->val, n->val, s)) return false;
+        }
+        if (p->numeric && anyBound) {
+            const double x = p->num;
+            if (x < lo || (x == lo && loOpen) || x > hi || (x == hi && hiOpen)) return false;
+        }
+    } else if (anyBound && allInt && !loOpen && !hiOpen && lo == hi) {
+        for (const Atom* n : nes) {
+            if (n->numeric && n->num == lo) return false;  // the one integer left is excluded
+        }
+    }
+    // A Bool slot that must be neither True nor False.
+    if (eqs.empty()) {
+        bool t = false, f = false;
+        for (const Atom* n : nes) {
+            if (n->val.type == ValueType::Bool) (n->val.as_bool() ? t : f) = true;
+        }
+        if (t && f) return false;
+    }
+    return true;
+}
+
+// Is a conjunction of formulas unsatisfiable? Ors are split case by case
+// (bounded); unknown parts are dropped, since they could be anything.
+bool unsat(std::vector<const Formula*> conj, const Script& s, int budget = 64) {
+    std::vector<const Formula*> flat;
+    for (size_t i = 0; i < conj.size(); ++i) {
+        const Formula* f = conj[i];
+        if (f->k == Formula::K::And) {
+            for (const Formula& p : f->parts) conj.push_back(&p);
+        } else {
+            flat.push_back(f);
+        }
+    }
+    std::map<std::string, std::vector<const Atom*>> bySlot;
+    const Formula* firstOr = nullptr;
+    for (const Formula* f : flat) {
+        if (f->k == Formula::K::Const && !f->constant) return true;
+        if (f->k == Formula::K::Atom) bySlot[f->atom.key].push_back(&f->atom);
+        if (f->k == Formula::K::Or && !firstOr) firstOr = f;
+    }
+    for (const auto& [k, as] : bySlot) {
+        if (!atoms_satisfiable(as, s)) return true;
+    }
+    if (!firstOr || budget <= 0) return false;
+    for (const Formula& d : firstOr->parts) {  // unsat only when every disjunct is
+        std::vector<const Formula*> next;
+        for (const Formula* f : flat) {
+            if (f != firstOr) next.push_back(f);
+        }
+        next.push_back(&d);
+        if (!unsat(next, s, budget / int(firstOr->parts.size() + 1) - 1)) return false;
+    }
+    return true;
+}
+
+bool decidable(const Formula& f) {
+    if (f.k == Formula::K::Atom || (f.k == Formula::K::Const && f.selfCompare)) return true;
+    for (const Formula& p : f.parts) {
+        if (decidable(p)) return true;
+    }
+    return false;
+}
+bool self_compared(const Formula& f) {
+    if (f.selfCompare) return true;
+    for (const Formula& p : f.parts) {
+        if (self_compared(p)) return true;
+    }
+    return false;
+}
+
+bool calls_in(const Expr& e) {
+    bool found = false;
+    each_expr(e, [&](const Expr& x) { if (x.kind == ExprKind::Call || x.kind == ExprKind::PropGet) found = true; });
+    return found;
+}
+
+// condition-impossible / condition-always-true, with what an If/ElseIf chain
+// has already ruled out carried into each later branch.
+void rule_conditions(Ctx& c, const FnView& v, const FnContext& fc) {
+    auto check = [&](const Stmt& st, const std::vector<Formula>* ctx) {
+        if (!st.rhs) return;
+        const Formula f = to_formula(*st.rhs, fc, calls_in(*st.rhs));
+        const Expr& cond = strip_casts(*st.rhs);
+        const bool isWhile = st.kind == StmtKind::While;
+        const std::string what = isWhile ? "This While" : "This If";
+        if (cond.kind == ExprKind::Lit) {
+            if (isWhile && f.k == Formula::K::Const && f.constant) return;  // While True: the loop rules judge it
+            Severity info = Severity::Info;
+            if (f.k == Formula::K::Const && !f.constant)
+                c.report(v, st.ip, kConditionImpossible,
+                         what + " tests a literal False, so its block never runs; if it is switched off on purpose, a comment saying so helps the next reader", &info);
+            else if (f.k == Formula::K::Const)
+                c.report(v, st.ip, kConditionAlwaysTrue, what + " tests a literal True, so the test does nothing", &info);
+            return;
+        }
+        if (!decidable(f)) return;
+        if (unsat({&f}, c.s)) {
+            c.report(v, st.ip, kConditionImpossible,
+                     what + "'s condition can never be true (" +
+                         (self_compared(f) ? std::string("it compares a value with itself") : std::string("its comparisons contradict each other")) +
+                         "), so its block never runs; a common cause is && written where || was meant, or a wrong value in one comparison");
+            return;
+        }
+        if (ctx && !ctx->empty()) {
+            std::vector<const Formula*> conj;
+            for (const Formula& g : *ctx) conj.push_back(&g);
+            conj.push_back(&f);
+            if (unsat(conj, c.s)) {
+                c.report(v, st.ip, kConditionImpossible,
+                         "This ElseIf can never be true: every value it accepts is already taken by an earlier If or ElseIf of the same chain, so its block never runs; reorder the tests or fix the bounds");
+                return;
+            }
+        }
+        if (isWhile && contains_return(st.body)) return;  // a loop left by Return may test True on purpose
+        const Formula nf = negate(f);
+        if (unsat({&nf}, c.s)) {
+            c.report(v, st.ip, kConditionAlwaysTrue,
+                     what + "'s condition is always true (" +
+                         (self_compared(f) ? std::string("it compares a value with itself") : std::string("its comparisons cover every value")) +
+                         "), so the test does nothing" + (!isWhile && !st.elseBody.empty() ? " and its Else never runs" : "") +
+                         "; a common cause is || written where && was meant");
+        }
+    };
+    std::function<void(const std::vector<StmtPtr>&, const std::vector<Formula>*)> walk =
+        [&](const std::vector<StmtPtr>& ss, const std::vector<Formula>* ctx) {
+            for (size_t i = 0; i < ss.size(); ++i) {
+                const Stmt& st = *ss[i];
+                // Only the first statement of an Else is reached with nothing run
+                // in between (an ElseIf is exactly that).
+                const std::vector<Formula>* here = i == 0 ? ctx : nullptr;
+                if (st.kind == StmtKind::If || st.kind == StmtKind::While) check(st, here);
+                if (st.kind == StmtKind::If && st.rhs) {
+                    std::vector<Formula> elseCtx = here ? *here : std::vector<Formula>{};
+                    elseCtx.push_back(negate(to_formula(*st.rhs, fc, calls_in(*st.rhs))));
+                    // A plain Else after tests that leave no value never runs.
+                    if (!st.elseBody.empty() && st.elseBody[0]->kind != StmtKind::If && elseCtx.size() > 1) {
+                        std::vector<const Formula*> conj;
+                        bool anyDecidable = false;
+                        for (const Formula& g : elseCtx) {
+                            conj.push_back(&g);
+                            anyDecidable = anyDecidable || decidable(g);
+                        }
+                        if (anyDecidable && unsat(conj, c.s))
+                            c.report(v, st.elseBody[0]->ip, kCodeUnreachable,
+                                     "This Else never runs: the If and ElseIf tests before it already take every value");
+                    }
+                    walk(st.body, nullptr);
+                    walk(st.elseBody, &elseCtx);
+                } else {
+                    walk(st.body, nullptr);
+                    walk(st.elseBody, nullptr);
+                }
+            }
+        };
+    walk(v.stmts, nullptr);
+}
+
+// --- code after a Return ------------------------------------------------------------
+
+bool always_returns(const Stmt& st) {
+    if (st.kind == StmtKind::Return) return true;
+    if (st.kind == StmtKind::If && !st.elseBody.empty()) {
+        auto ends = [](const std::vector<StmtPtr>& ss) {
+            for (const StmtPtr& p : ss) {
+                if (always_returns(*p)) return true;
+            }
+            return false;
+        };
+        return ends(st.body) && ends(st.elseBody);
+    }
+    // While True ends only through a Return.
+    if (st.kind == StmtKind::While && st.rhs && literal_true(strip_casts(*st.rhs))) return true;
+    return false;
+}
+
+void rule_unreachable(Ctx& c, const FnView& v) {
+    std::function<void(const std::vector<StmtPtr>&)> walk = [&](const std::vector<StmtPtr>& ss) {
+        bool ended = false;
+        for (const StmtPtr& p : ss) {
+            const Stmt& st = *p;
+            if (ended) {
+                if (st.kind == StmtKind::Decl && !st.rhs) continue;  // a bare declaration makes no code
+                c.report(v, st.ip, kCodeUnreachable,
+                         "This code never runs: every path before it ends in a Return (or in a While True that only a Return leaves); remove it, or move it before the Return");
+                break;
+            }
+            walk(st.body);
+            walk(st.elseBody);
+            if (always_returns(st)) ended = true;
+        }
+    };
+    walk(v.stmts);
+}
+
 // --- driver -------------------------------------------------------------------
 
 void collect_states(Ctx& c, const Object& o) {
@@ -1124,6 +1575,8 @@ AuditResult audit(const Script& s, const AuditOptions& opt) {
         rule_recursion(c, v, fc);
         rule_gotostate(c, v, fc);
         rule_array_none(c, v, fc);
+        rule_conditions(c, v, fc);
+        rule_unreachable(c, v);
     }
     rule_update_pairs(c);
 

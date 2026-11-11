@@ -1199,6 +1199,118 @@ EndEvent
     r.sources["formlist"] = "Scriptname FormList extends Form\nFunction AddForm(Form apForm) native\n";
     r.sources["utility"] = "Scriptname Utility\nFunction Wait(float afSeconds) native global\n";
     r.sources["game"] = "Scriptname Game\nForm Function GetFormFromFile(int aiFormID, string asFilename) native global\nint Function GetModByName(string asName) native global\n";
+    r.sources["auditconditions"] = R"(Scriptname AuditConditions extends ObjectReference
+
+Int level
+Bool flag
+Form Property Thing Auto
+
+Function BothEqual(Int x)
+    If x == 1 && x == 2
+        level = 1
+    EndIf
+EndFunction
+
+Function RangeEmpty(Int x)
+    If x > 5 && x < 6
+        level = 1
+    EndIf
+EndFunction
+
+Function RangeFine(Float x)
+    If x > 5.0 && x < 6.0
+        level = 1
+    EndIf
+EndFunction
+
+Function NotEqualOr(Int x)
+    If x != 1 || x != 2
+        level = 1
+    EndIf
+EndFunction
+
+Function SelfCompare(Int x)
+    If x == x
+        level = 1
+    EndIf
+EndFunction
+
+Function Shadowed(Int x)
+    If x < 10
+        level = 1
+    ElseIf x < 5
+        level = 2
+    ElseIf x >= 10
+        level = 3
+    Else
+        level = 4
+    EndIf
+EndFunction
+
+Function ChainFine(Int x)
+    If x < 10
+        level = 1
+    ElseIf x < 20
+        level = 2
+    Else
+        level = 3
+    EndIf
+EndFunction
+
+Function CastsDiffer(Form f)
+    If (f as Weapon) != None
+        level = 1
+    ElseIf (f as Armor) != None
+        level = 2
+    EndIf
+EndFunction
+
+Function BoolBoth()
+    If flag && !flag
+        level = 1
+    EndIf
+EndFunction
+
+Function LengthNegative(Int[] a)
+    If a.Length < 0
+        level = 1
+    EndIf
+EndFunction
+
+Function AfterReturn()
+    level = 1
+    Return
+    level = 2
+EndFunction
+
+Int Function BothBranchesReturn(Int x)
+    If x > 0
+        Return 1
+    Else
+        Return 2
+    EndIf
+    level = 3
+EndFunction
+
+Int Function LoopReturns(Int x)
+    While True
+        If x > 3
+            Return x
+        EndIf
+        x += 1
+    EndWhile
+    level = 4
+EndFunction
+
+Function Fine(Int x)
+    If x > 0
+        Return
+    EndIf
+    level = 5
+EndFunction
+)";
+    r.sources["weapon"] = "Scriptname Weapon extends Form\n";
+    r.sources["armor"] = "Scriptname Armor extends Form\n";
     r.sources["auditsample"] = R"(Scriptname AuditSample extends ObjectReference
 
 Int[] neverCreated
@@ -1370,9 +1482,10 @@ EndEvent
             return it == scripts.end() ? nullptr : it->second;
         }
     } resolver;
-    Script sample, states, objectReference, form, scriptObject;
+    Script sample, states, conditions, objectReference, form, scriptObject;
     CHECK(compile_sample(r, "AuditSample", sample));
     CHECK(compile_sample(r, "AuditStates", states));
+    CHECK(compile_sample(r, "AuditConditions", conditions));
     CHECK(compile_sample(r, "ObjectReference", objectReference));
     CHECK(compile_sample(r, "Form", form));
     CHECK(compile_sample(r, "ScriptObject", scriptObject));
@@ -1437,7 +1550,27 @@ EndEvent
     CHECK(unknownStates == 1);  // "Bussy" only: "None" and the GetState flag "Flag" are not reported
     CHECK(count(b, "OnUpdate") == 0);  // the script has GotoState, so the re-arm has an exit
     CHECK(count(b, "OnItemAdded") == 0);  // filtered, and no quest call
-    CHECK(audit_rules().size() == 17);
+    CHECK(audit_rules().size() == 20);
+
+    const AuditResult k = audit(conditions, opt);
+    CHECK(k.skipped == 0);
+    CHECK(has(k, "BothEqual", "condition-impossible"));
+    CHECK(has(k, "RangeEmpty", "condition-impossible"));    // Int: nothing lies strictly between 5 and 6
+    CHECK(count(k, "RangeFine") == 0);                      // Float: 5.5 does
+    CHECK(has(k, "NotEqualOr", "condition-always-true"));
+    CHECK(has(k, "SelfCompare", "condition-always-true"));
+    CHECK(has(k, "Shadowed", "condition-impossible"));      // x < 5 after x < 10
+    CHECK(has(k, "Shadowed", "code-unreachable"));          // the Else after x < 10 / x >= 10
+    CHECK(count(k, "ChainFine") == 0);
+    CHECK(count(k, "CastsDiffer") == 0);                    // (f as Weapon) and (f as Armor) are different values
+    CHECK(has(k, "BoolBoth", "condition-impossible"));
+    CHECK(has(k, "LengthNegative", "condition-impossible"));
+    CHECK(has(k, "AfterReturn", "code-unreachable"));
+    CHECK(has(k, "BothBranchesReturn", "code-unreachable"));
+    CHECK(has(k, "LoopReturns", "code-unreachable"));
+    CHECK(!has(k, "LoopReturns", "condition-always-true"));  // While True is the loop rules' business
+    CHECK(count(k, "Fine") == 0);
+    for (const Finding& f : k.findings) CHECK(f.line > 0);
     // The message carries the counter nobody reads.
     for (const Finding& f : a.findings) {
         if (f.function == "LoopPollsWithWait") CHECK(f.message.find("tries counts them") != std::string::npos);
