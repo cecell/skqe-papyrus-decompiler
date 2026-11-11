@@ -212,6 +212,17 @@ commands
                                name; the defaults are "skqe" and "papyrus". The
                                header's source field is the file name alone, never
                                the path given. Every command takes --help
+  recompile <input> [--user <name>] [--computer <name>] [--source-filename] [--out <dir>]
+            [--dry-run]
+                               rewrites the header fields that say who built a
+                               script and from where, in every script of the
+                               input: --user and --computer replace those two
+                               fields, --source-filename cuts the source field to
+                               its file name. Nothing else in the file changes.
+                               Loose files are rewritten in place (refused while
+                               the game runs) or, with --out, copied there changed;
+                               scripts inside archives only with --out. Reads
+                               every written file back
   check --parse <SourceDir>    parse every .psc below the folder with the compiler
                                front end; lists the files it cannot parse
   check --compile <SourceDir> --pex <input> [--import <dir;dir>] [--flags <flg>]
@@ -298,6 +309,7 @@ struct Options {
     bool dryRun = false;
     bool backup = false;
     bool comments = false;
+    bool sourceFilename = false;  // recompile: cut the header's source field to its file name
     bool keepGenerated = false;
     bool optionalObjects = false;
     std::string out;
@@ -333,6 +345,7 @@ bool parse(int argc, char** argv, int from, Options& o, const char* cmd) {
         else if (a == "--flags" && hasNext) o.flags = argv[++i];
         else if (a == "--user" && hasNext) o.userName = argv[++i];
         else if (a == "--computer" && hasNext) o.computerName = argv[++i];
+        else if (a == "--source-filename") o.sourceFilename = true;
         else if (a == "--resolve" && hasNext) o.resolve.push_back(argv[++i]);
         else if (a == "--vanilla" && hasNext) o.vanilla = argv[++i];
         else if (a == "--data" && hasNext) o.data = argv[++i];
@@ -2491,6 +2504,99 @@ int cmd_patch(int argc, char** argv) {
     return failures ? 1 : 0;
 }
 
+// --- recompile: the header's user, computer and source fields -------------------
+
+// Rewrites the header fields that name who built a script and from where, in
+// every script of the input; nothing else in the file changes (the writer is
+// byte-exact). Loose files are rewritten in place, or written to --out;
+// archive members only to --out, extracted. Like patch, refuses to write in
+// place while the game runs.
+int cmd_recompile(int argc, char** argv) {
+    Options o;
+    if (!parse(argc, argv, 2, o, "recompile")) return 2;
+    if (o.userName.empty() && o.computerName.empty() && !o.sourceFilename) {
+        std::fprintf(stderr, "recompile: give --user <name>, --computer <name> and/or --source-filename\n");
+        return 2;
+    }
+    std::vector<pextool::Item> items;
+    if (!collect(o, items)) return 2;
+    std::error_code ec;
+    const bool toOut = !o.out.empty();
+    if (toOut && !o.dryRun) fs::create_directories(fs::u8path(o.out), ec);
+    bool inPlace = false;
+    for (const pextool::Item& it : items)
+        if (it.archive.empty() && !toOut) inPlace = true;
+    if (inPlace && !o.dryRun) {
+        std::string why;
+        if (!pextool::verify_game_not_running(why)) {
+            std::fprintf(stderr, "recompile: %s\n", why.c_str());
+            return 2;
+        }
+    }
+
+    std::atomic<int> changed{0}, same{0}, skipped{0}, failures{0};
+    std::mutex mu;
+    pextool::for_each_parallel(items, o.threads, [&](size_t, const pextool::Item& it, pextool::Loader& ld) {
+        if (!it.archive.empty() && !toOut) {
+            ++skipped;
+            std::lock_guard<std::mutex> lk(mu);
+            std::fprintf(stderr, "%s: inside an archive; give --out <folder> to write the changed copy there\n",
+                         it.label.c_str());
+            return;
+        }
+        pex::Script s;
+        if (!load_script(it, ld, s, mu)) {
+            ++failures;
+            return;
+        }
+        pex::Header& h = s.header;
+        const pex::Header before = h;
+        if (!o.userName.empty()) h.userName = o.userName;
+        if (!o.computerName.empty()) h.computerName = o.computerName;
+        if (o.sourceFilename) {
+            const size_t cut = h.sourceName.find_last_of("/\\");
+            if (cut != std::string::npos) h.sourceName = h.sourceName.substr(cut + 1);
+        }
+        const bool differs = h.userName != before.userName || h.computerName != before.computerName ||
+                             h.sourceName != before.sourceName;
+        if (!differs) {
+            ++same;
+            return;
+        }
+        const fs::path target = toOut ? fs::u8path(o.out) / fs::u8path(it.name) : it.file;
+        if (o.dryRun) {
+            ++changed;
+            std::lock_guard<std::mutex> lk(mu);
+            std::printf("%s: would write user \"%s\" computer \"%s\" source \"%s\"%s\n", it.label.c_str(),
+                        h.userName.c_str(), h.computerName.c_str(), h.sourceName.c_str(),
+                        toOut ? (" -> " + target.u8string()).c_str() : "");
+            return;
+        }
+        std::string err;
+        if (pex::write_file(s, target, &err) != pex::Status::Ok) {
+            ++failures;
+            std::lock_guard<std::mutex> lk(mu);
+            std::fprintf(stderr, "%s: cannot write %s: %s\n", it.label.c_str(), target.u8string().c_str(), err.c_str());
+            return;
+        }
+        // Read it back: the fields are what was asked, nothing else moved.
+        pex::Script back;
+        if (pex::read_file(target, back, &err) != pex::Status::Ok || back.header.userName != h.userName ||
+            back.header.computerName != h.computerName || back.header.sourceName != h.sourceName ||
+            back.objects.size() != s.objects.size() || back.strings.size() != s.strings.size()) {
+            ++failures;
+            std::lock_guard<std::mutex> lk(mu);
+            std::fprintf(stderr, "%s: written file does not read back as expected: %s\n", target.u8string().c_str(),
+                         err.c_str());
+            return;
+        }
+        ++changed;
+    });
+    std::printf("scripts %zu  %s %d  already as asked %d  skipped %d  failed %d\n", items.size(),
+                o.dryRun ? "would change" : "changed", changed.load(), same.load(), skipped.load(), failures.load());
+    return failures ? 1 : 0;
+}
+
 int cmd_winners(int argc, char** argv) {
     Options o;
     if (!parse(argc, argv, 2, o, "winners")) return 2;
@@ -2549,6 +2655,7 @@ int main(int argc, char** argv_) {
     if (cmd == "closure") return cmd_closure(argc, argv.data());
     if (cmd == "patch") return cmd_patch(argc, argv.data());
     if (cmd == "winners") return cmd_winners(argc, argv.data());
+    if (cmd == "recompile") return cmd_recompile(argc, argv.data());
     if (cmd == "check") return cmd_check(argc, argv.data());
     std::fprintf(stderr, "unknown command %s (pex help)\n", cmd.c_str());
     return 2;

@@ -43,7 +43,8 @@ script on a modded machine, and the numbers are below. What it does:
    computer; Bethesda's compiler writes the path it was given and the
    Windows account and machine name there. `pex compile` writes the file
    name alone and `skqe` / `papyrus`, or whatever `--user` and `--computer`
-   say.
+   say. `pex recompile` sets the same three fields in scripts that already
+   exist, yours or anyone's, without touching anything else in them.
 5. **The analyses the ESL-compaction tooling needs**, with no compiler
    involved: `refs` lists every FormID literal paired with its plugin name,
    `patch --map` renumbers them in the compiled file, `closure` tells whether
@@ -176,6 +177,11 @@ pex patch --out <folder> --plugin <Name.esp> --formid OLD:NEW [--update]
                                  archive; the mode for a whole setup
 pex winners [<Data>] [--load-order <plugins.txt>] [--all-plugins]
                                  the copy of each script the game loads, as CSV
+pex recompile <input> [--user <name>] [--computer <name>] [--source-filename] [--out <dir>] [--dry-run]
+                                 rewrites the header fields that say who built a
+                                 script and from where, in every script of the input;
+                                 nothing else changes. In place for loose files (not
+                                 while the game runs), to --out for archive members
 pex check --rewrite <input>      read + write, compare byte for byte
 pex check --asm <input> --tools "<game>\Papyrus Compiler"
 pex check --assemble <input> [--tools "<game>\Papyrus Compiler"]
