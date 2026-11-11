@@ -33,7 +33,12 @@ public:
         m_s.header.minor = 2;
         m_s.header.gameId = 1;
         m_s.header.compileTime = m_opt.compileTime ? m_opt.compileTime : now();
-        m_s.header.sourceName = m_src.path.empty() ? m_src.name + ".psc" : m_src.path;
+        // The file name alone, as Bethesda's compiler writes it: never the path
+        // it was given, which would carry the account name of whoever built it.
+        std::string src = m_src.path.empty() ? m_src.name + ".psc" : m_src.path;
+        const size_t cut = src.find_last_of("/\\");
+        if (cut != std::string::npos) src = src.substr(cut + 1);
+        m_s.header.sourceName = src;
         m_s.header.userName = m_opt.userName;
         m_s.header.computerName = m_opt.computerName;
         intern("");
