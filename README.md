@@ -89,6 +89,10 @@ or the [releases page](https://github.com/cecell/skqe-papyrus-decompiler/release
 and run `pex.exe` from a command prompt. `pex help` lists the commands. It needs no installer, no
 runtime and no Creation Kit.
 
+To decompile a script without a command prompt, open the `.pex` with `pex.exe` (right-click,
+Open with, or drag the file onto the exe): the source lands next to it as `<name>.psc`, and it
+asks before overwriting one that exists.
+
 ## Use
 
 ```cpp

@@ -1,0 +1,30 @@
+// The exe's icon and version block (Windows only). The icon is what Explorer
+// shows for pex.exe and for .pex files opened with it.
+#include <windows.h>
+#include "pex_version.h"
+
+IDI_ICON1 ICON "pex.ico"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION PEX_RC_VERSION
+PRODUCTVERSION PEX_RC_VERSION
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "FileDescription", "pex: Papyrus compiler, decompiler and script tools for Skyrim"
+      VALUE "FileVersion", PEX_RC_VERSION_STR
+      VALUE "ProductName", "Papyrus Manager Compiler Decompiler"
+      VALUE "ProductVersion", PEX_RC_VERSION_STR
+      VALUE "OriginalFilename", "pex.exe"
+      VALUE "LegalCopyright", "GPL-3.0-only"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END

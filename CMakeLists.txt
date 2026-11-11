@@ -77,6 +77,24 @@ if(SKQE_PAPYRUS_BUILD_TOOLS)
     endif()
 
     add_executable(pex tools/pex.cpp tools/archive_patch.cpp tools/out_patch.cpp)
+    if(WIN32)
+        enable_language(RC)
+        # Icon and version block. The version comes from project(), as a
+        # generated header the resource script includes.
+        string(REPLACE "." ";" _pex_ver "${PROJECT_VERSION}")
+        list(LENGTH _pex_ver _pex_n)
+        while(_pex_n LESS 4)
+            list(APPEND _pex_ver 0)
+            list(LENGTH _pex_ver _pex_n)
+        endwhile()
+        string(REPLACE ";" "," _pex_ver_rc "${_pex_ver}")
+        file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/pex_version.h
+            "#define PEX_RC_VERSION ${_pex_ver_rc}
+#define PEX_RC_VERSION_STR \"${PROJECT_VERSION}\"
+")
+        target_sources(pex PRIVATE tools/pex.rc)
+        target_include_directories(pex PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+    endif()
     target_link_libraries(pex PRIVATE skqe::papyrus bsa::reader skqe)
     if(MSVC)
         target_compile_options(pex PRIVATE /W4 /permissive- /utf-8 /EHsc)

@@ -261,6 +261,10 @@ commands
                                duplicates once.
   help
 
+  pex.exe <file.pex> alone (Explorer's "Open with", or a file dragged onto the
+  exe) decompiles it to <name>.psc in the same folder and asks before
+  overwriting an existing one.
+
   For json and asm, --out is a file for one script and a directory for many
   (one <name>.json / <name>.pas each); without it one script goes to stdout.
 
@@ -2620,6 +2624,67 @@ int help() {
 
 }  // namespace
 
+// --- "Open with": pex.exe <file.pex> and nothing else -----------------------------
+
+// Explorer's Open With (or a drag onto the exe) runs `pex.exe <file.pex>`. That
+// decompiles the file to <name>.psc next to it, consulting the other scripts in
+// its folder, and asks before overwriting a source that already exists. When
+// the console belongs to this process alone (it was opened for the double
+// click and would vanish with it), the window waits for Enter at the end.
+#ifdef _WIN32
+bool own_console() {
+    DWORD pids[2];
+    return GetConsoleProcessList(pids, 2) == 1;
+}
+bool stdin_is_terminal() { return _isatty(_fileno(stdin)) != 0; }
+#else
+#include <unistd.h>
+bool own_console() { return false; }
+bool stdin_is_terminal() { return isatty(fileno(stdin)) != 0; }
+#endif
+
+int open_with(const std::string& arg) {
+    const fs::path file = fs::u8path(arg);
+    const fs::path folder = file.parent_path().empty() ? fs::current_path() : file.parent_path();
+    const fs::path target = folder / (file.stem().u8string() + ".psc");
+    const bool pause = own_console();
+    int rc = 0;
+    std::error_code ec;
+    bool go = true;
+    if (fs::exists(target, ec)) {
+        if (!stdin_is_terminal()) {
+            std::fprintf(stderr, "%s exists; not overwritten (no terminal to ask on). Use: pex decompile <file> --out <path>\n",
+                         target.u8string().c_str());
+            go = false;
+            rc = 1;
+        } else {
+            std::printf("%s exists. Overwrite? [y/N] ", target.u8string().c_str());
+            std::fflush(stdout);
+            char line[64] = {0};
+            if (!std::fgets(line, sizeof line, stdin)) line[0] = 0;
+            const char c = static_cast<char>(std::tolower(static_cast<unsigned char>(line[0])));
+            if (c != 'y') {
+                std::printf("Left as it is.\n");
+                go = false;
+            }
+        }
+    }
+    if (go) {
+        std::string f = file.u8string(), out = target.u8string(), res = folder.u8string();
+        std::string a0 = "pex", a1 = "decompile", a2 = "--out", a3 = "--resolve";
+        char* args[] = {a0.data(), a1.data(), f.data(), a2.data(), out.data(), a3.data(), res.data(), nullptr};
+        rc = cmd_decompile(7, args);
+        if (rc == 0) std::printf("%s\n", out.c_str());
+    }
+    if (pause) {
+        std::printf("Press Enter to close.");
+        std::fflush(stdout);
+        char line[8];
+        (void)std::fgets(line, sizeof line, stdin);
+    }
+    return rc;
+}
+
 #ifdef _WIN32
 // Arguments arrive as UTF-16; the tool works in UTF-8 throughout.
 int wmain(int argc, wchar_t** wargv) {
@@ -2638,6 +2703,8 @@ int main(int argc, char** argv_) {
 #endif
     if (argc < 2) return help(), 2;
     const std::string cmd = argv[1];
+    if (argc == 2 && pextool::iequals_ext(fs::u8path(cmd), ".pex") && fs::is_regular_file(fs::u8path(cmd)))
+        return open_with(cmd);
     if (cmd == "help" || cmd == "--help" || cmd == "-h" || cmd == "/?") return help();
     if (cmd == "--version" || cmd == "-V") {
         std::printf("pex %s\n", pex::kVersion);
