@@ -20,10 +20,12 @@ struct FillsReport {
 
 // Reads the load order (`pluginsTxt` against `data`) and records in
 // `index.filled` every property some attachment of each script fills; sets
-// index.fillsKnown. `patterns` is skqe's patterns.json. False with `why` set
+// index.fillsKnown. skqe's catalog comes from skqe::ReadDataFile: the copy
+// built into pex.exe, unless a patterns.json on disk (SKQE_DATA, or next to
+// the exe) overrides it; `catalogSource` says which. False with `why` set
 // when the load order or the catalog cannot be read; a plugin that cannot be
 // opened is skipped and named in `why` while the rest still counts.
-bool load_vmad_fills(const std::filesystem::path& data, const std::filesystem::path& pluginsTxt, const std::filesystem::path& patterns,
-                     unsigned threads, papyrus::pex::AuditIndex& index, FillsReport& report, std::string& why);
+bool load_vmad_fills(const std::filesystem::path& data, const std::filesystem::path& pluginsTxt, unsigned threads,
+                     papyrus::pex::AuditIndex& index, FillsReport& report, std::string& catalogSource, std::string& why);
 
 }  // namespace pextool

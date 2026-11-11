@@ -1707,21 +1707,16 @@ int cmd_audit(int argc, char** argv) {
                          plugins.u8string().c_str());
             return 2;
         }
-        fs::path patterns = fs::u8path("patterns.json");
-#ifdef _WIN32
-        wchar_t exe[MAX_PATH];
-        const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
-        if (n > 0 && n < MAX_PATH) patterns = fs::path(exe).parent_path() / "patterns.json";
-#endif
         pextool::FillsReport rep;
-        std::string why;
+        std::string why, catalog;
         const auto tf = std::chrono::steady_clock::now();
-        if (!pextool::load_vmad_fills(data, plugins, patterns, o.threads, index, rep, why)) {
+        if (!pextool::load_vmad_fills(data, plugins, o.threads, index, rep, catalog, why)) {
             std::fprintf(stderr, "audit --fills: %s\n", why.c_str());
             return 2;
         }
         if (!why.empty()) std::fprintf(stderr, "audit --fills: %s\n", why.c_str());
-        std::fprintf(stderr, "fills: %zu plugins, %zu script attachments, %zu scripts attached, %.1fs\n", rep.plugins, rep.attachments, rep.scripts,
+        std::fprintf(stderr, "fills: %zu plugins, %zu script attachments, %zu scripts attached, catalog %s, %.1fs\n", rep.plugins, rep.attachments,
+                     rep.scripts, catalog.c_str(),
                      std::chrono::duration<double>(std::chrono::steady_clock::now() - tf).count());
     }
     pex::finish_index(index);

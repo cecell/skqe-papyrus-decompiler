@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "vmad_fills.hpp"
 
+#include "data_files.h"      // skqe: ReadDataFile
 #include "db_build.h"        // skqe: LoadOrder
 #include "pattern_engine.h"  // skqe: PatternCatalog
 #include "plugin.h"          // skqe: Plugin
@@ -53,20 +54,19 @@ void collect(const skqe::Value& v, std::map<std::string, std::set<std::string>>&
 
 }  // namespace
 
-bool load_vmad_fills(const fs::path& data, const fs::path& pluginsTxt, const fs::path& patterns, unsigned threads,
-                     papyrus::pex::AuditIndex& index, FillsReport& report, std::string& why) {
-    std::error_code ec;
-    std::ifstream in(patterns, std::ios::binary);
-    if (!in) {
-        why = "cannot read the plugin catalog " + patterns.u8string() + " (patterns.json belongs next to pex.exe)";
+bool load_vmad_fills(const fs::path& data, const fs::path& pluginsTxt, unsigned threads, papyrus::pex::AuditIndex& index,
+                     FillsReport& report, std::string& catalogSource, std::string& why) {
+    std::string text;
+    std::wstring source;
+    if (!skqe::ReadDataFile(L"patterns.json", &text, &source)) {
+        why = "the plugin catalog patterns.json is not built into this pex.exe and is not on disk";
         return false;
     }
-    std::stringstream text;
-    text << in.rdbuf();
+    catalogSource = source == L"embedded" ? std::string("built in") : fs::path(source).u8string();
     skqe::PatternCatalog catalog;
     std::string err;
-    if (!catalog.Load(text.str(), &err)) {
-        why = "the plugin catalog " + patterns.u8string() + ": " + err;
+    if (!catalog.Load(text, &err)) {
+        why = "the plugin catalog (" + catalogSource + "): " + err;
         return false;
     }
     // The record types that can carry scripts.

@@ -12,7 +12,7 @@ of that library come from xEdit's definitions (`Core/wbDefinitionsTES5.pas`,
 `Core/wbDefinitionsCommon.pas`): condition function names and parameter types, the subrecords xEdit
 labels unused, the rules for comparing records, and xEdit's names for subrecords.
 
-`patterns.json` in the release zip is Skyrim Query Engine's catalog of plugin record layouts,
+`pex.exe` carries Skyrim Query Engine's catalog of plugin record layouts (`patterns.json`, built in),
 which `pex audit --fills` reads plugins with. Its `_display` and `_names` sections hold xEdit's names
 for subrecords and remain available under the MPL 2.0.
 

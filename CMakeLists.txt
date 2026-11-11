@@ -66,8 +66,12 @@ if(SKQE_PAPYRUS_BUILD_TOOLS)
     # Only the library is built, not its tool or tests.
     FetchContent_Declare(skqe_lib
         GIT_REPOSITORY https://github.com/cecell/skyrim-query-engine.git
-        GIT_TAG 29f64145a0bd85bf1f63194b35ba6a4f3c8c40da  # after its own pins were rewritten; the library target is skqe
+        GIT_TAG ff4c06b2055523cbcb7532a34c81aea683dce19f  # main, 2026-11-11: data files can be built in
         EXCLUDE_FROM_ALL)
+    # skqe's catalog (patterns.json) built into pex.exe, so audit --fills needs
+    # no file beside it. A patterns.json found on disk (SKQE_DATA, or next to
+    # the exe) still wins over the built-in copy.
+    set(SKQE_EMBED_DATA ON CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(bsa_reader skqe_lib)
     # skqe registers its test ("unit") whether or not it is the top project; it
     # is not built here, and skqe's own repo runs it. ctest applies this to every
@@ -77,11 +81,6 @@ if(SKQE_PAPYRUS_BUILD_TOOLS)
     endif()
 
     add_executable(pex tools/pex.cpp tools/archive_patch.cpp tools/out_patch.cpp tools/vmad_fills.cpp)
-    # audit --fills reads plugins with skqe's catalog, which pex looks for next
-    # to itself.
-    add_custom_command(TARGET pex POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${skqe_lib_SOURCE_DIR}/data/patterns.json
-                $<TARGET_FILE_DIR:pex>/patterns.json)
     if(WIN32)
         enable_language(RC)
         # Icon and version block. The version comes from project(), as a
