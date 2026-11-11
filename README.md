@@ -124,7 +124,7 @@ pex json <input> [--out <path>]  the whole model as JSON
 pex asm <input> [--out <path>]   Papyrus assembly (PapyrusAssembler syntax)
 pex assemble <listing> [--out <path>]
                                  the listing back to a .pex (our assembler)
-pex compile <psc|dir> --flags <flg> [--import <dirs>] [--resolve <Data>] [--out <dir>]
+pex compile <psc|dir> --flags <flg> [--import <dirs>] [--resolve <Data>] [--out <dir>] [--user <name>] [--computer <name>]
                                  Papyrus source to .pex (our compiler)
 pex decompile <input> [--out <path>] [--resolve <Data>]
                                  Papyrus source; --resolve lets it consult the
