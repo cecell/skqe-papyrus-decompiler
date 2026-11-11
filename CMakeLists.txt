@@ -66,7 +66,7 @@ if(SKQE_PAPYRUS_BUILD_TOOLS)
     # Only the library is built, not its tool or tests.
     FetchContent_Declare(spf
         GIT_REPOSITORY https://github.com/cecell/skyrim-query-engine.git
-        GIT_TAG 8f78c3b8e8e027857759da6ab00b7b7b068a0d07  # after its own pins were rewritten; the library target is skqe
+        GIT_TAG 29f64145a0bd85bf1f63194b35ba6a4f3c8c40da  # after its own pins were rewritten; the library target is skqe
         EXCLUDE_FROM_ALL)
     FetchContent_MakeAvailable(bsa_reader spf)
     # spf registers its test ("unit") whether or not it is the top project; it
