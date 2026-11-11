@@ -43,7 +43,7 @@ std::string lower(std::string s) {
     return s;
 }
 
-// The vanilla lists, used when no ini sets them; the same as spf's and the
+// The vanilla lists, used when no ini sets them; the same as skqe's and the
 // Skyrim_Default.ini the game ships.
 const char* const kDefaultList1 =
     "Skyrim - Misc.bsa, Skyrim - Shaders.bsa, Skyrim - Interface.bsa, Skyrim - Animations.bsa, Skyrim - Meshes0.bsa, "
@@ -543,8 +543,8 @@ std::vector<std::string> listed_plugin_names(const fs::path& file) {
     return out;
 }
 
-// The same order spf builds from plugins.txt's active lines, with the inactive
-// lines kept: spf takes this list as given and only moves masters first.
+// The same order skqe builds from plugins.txt's active lines, with the inactive
+// lines kept: skqe takes this list as given and only moves masters first.
 std::vector<std::string> every_listed_plugin(const fs::path& data, const fs::path& pluginsTxt) {
     std::vector<std::string> names = {"Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm"};
     std::error_code ec;

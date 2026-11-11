@@ -59,21 +59,21 @@ if(SKQE_PAPYRUS_BUILD_TOOLS)
     FetchContent_Declare(bsa_reader
         GIT_REPOSITORY https://github.com/cecell/bsa-reader.git
         GIT_TAG 88e40b4022050d0ea7d850a7804c56dcca58b77f)  # v0.1.1
-    # spf, the library of Skyrim Query Engine (GPL-3.0,
-    # github.com/cecell/skyrim-query-engine, formerly skyrim-plugin-format): the
+    # skqe, the library of Skyrim Query Engine (GPL-3.0,
+    # github.com/cecell/skyrim-query-engine): the
     # load order and which archives load, for patch --out and winners, so that
     # the rule lives in one place. Changes go to that repo, then bump this pin.
     # Only the library is built, not its tool or tests.
-    FetchContent_Declare(spf
+    FetchContent_Declare(skqe_lib
         GIT_REPOSITORY https://github.com/cecell/skyrim-query-engine.git
         GIT_TAG 29f64145a0bd85bf1f63194b35ba6a4f3c8c40da  # after its own pins were rewritten; the library target is skqe
         EXCLUDE_FROM_ALL)
-    FetchContent_MakeAvailable(bsa_reader spf)
-    # spf registers its test ("unit") whether or not it is the top project; it
-    # is not built here, and spf's own repo runs it. ctest applies this to every
+    FetchContent_MakeAvailable(bsa_reader skqe_lib)
+    # skqe registers its test ("unit") whether or not it is the top project; it
+    # is not built here, and skqe's own repo runs it. ctest applies this to every
     # test of that name, so no test here may be called unit.
     if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.28)
-        set_property(TEST unit DIRECTORY ${spf_BINARY_DIR} PROPERTY DISABLED TRUE)
+        set_property(TEST unit DIRECTORY ${skqe_lib_BINARY_DIR} PROPERTY DISABLED TRUE)
     endif()
 
     add_executable(pex tools/pex.cpp tools/archive_patch.cpp tools/out_patch.cpp)

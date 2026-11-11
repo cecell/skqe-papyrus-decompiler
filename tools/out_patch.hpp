@@ -6,7 +6,7 @@
 // Which copy wins, highest first: a copy already in the output folder (so runs
 // for several plugins build on each other), the loose file in Data\Scripts, the
 // copy in the loaded archive with the highest rank. The load order rules are
-// spf's (skyrim-plugin-format), the same code `spf build-assets` uses.
+// skqe's (skyrim-query-engine), the same code `skqe build-assets` uses.
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
