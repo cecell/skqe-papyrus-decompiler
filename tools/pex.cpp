@@ -199,13 +199,16 @@ commands
                                folder) and compare the result with the
                                original at model level
   compile <psc|dir> [--import <dir;dir>] [--flags <flg>] [--out <dir>] [--declarations]
-            [--resolve <dir|bsa>]
+            [--resolve <dir|bsa>] [--user <name>] [--computer <name>]
                                our compiler: .psc to .pex (--import folders are
                                searched first, as PapyrusCompiler's -i list, then
                                the source's own folder; a dependency without
                                source is taken from its compiled file in
                                --resolve); with --declarations every function
-                               body is left empty
+                               body is left empty. --user and --computer set the
+                               header's user and computer fields, which Bethesda's
+                               compiler fills with the Windows account and machine
+                               name; the defaults are "skqe" and "papyrus"
   check --parse <SourceDir>    parse every .psc below the folder with the compiler
                                front end; lists the files it cannot parse
   check --compile <SourceDir> --pex <input> [--import <dir;dir>] [--flags <flg>]
@@ -297,6 +300,8 @@ struct Options {
     std::string out;
     std::string tools;
     std::string work;
+    std::string userName;      // compile: the header's user and computer fields
+    std::string computerName;
     std::vector<std::string> inputs;
 };
 
@@ -320,6 +325,8 @@ bool parse(int argc, char** argv, int from, Options& o, const char* cmd) {
         else if (a == "--all-copies") o.allCopies = true;
         else if (a == "--import" && hasNext) o.imports = argv[++i];
         else if (a == "--flags" && hasNext) o.flags = argv[++i];
+        else if (a == "--user" && hasNext) o.userName = argv[++i];
+        else if (a == "--computer" && hasNext) o.computerName = argv[++i];
         else if (a == "--resolve" && hasNext) o.resolve.push_back(argv[++i]);
         else if (a == "--vanilla" && hasNext) o.vanilla = argv[++i];
         else if (a == "--data" && hasNext) o.data = argv[++i];
@@ -1126,6 +1133,8 @@ int cmd_compile(int argc, char** argv) {
     co.flags = setup.flags;
     co.resolver = resolver.get();
     co.declarationsOnly = o.declarations;
+    if (!o.userName.empty()) co.userName = o.userName;
+    if (!o.computerName.empty()) co.computerName = o.computerName;
     int failures = 0;
     for (const fs::path& in : files) {
         pex::Script s;
