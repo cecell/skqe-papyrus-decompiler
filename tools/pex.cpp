@@ -117,7 +117,8 @@ commands
                                (inherited states, declared types). Audits the
                                copy the game loads of each script (loose
                                beats archive); --all-copies audits every file.
-  diff <old> <new> [--resolve <dir|bsa>] [--json] [--quiet]
+)"
+    R"(  diff <old> <new> [--resolve <dir|bsa>] [--json] [--quiet]
                                what changed between two versions of a script,
                                in plain English: declarations (properties,
                                variables, functions, states, signatures),
