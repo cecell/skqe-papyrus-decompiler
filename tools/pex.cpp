@@ -24,6 +24,7 @@
 #include <chrono>
 #include <memory>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <ctime>
@@ -208,7 +209,9 @@ commands
                                body is left empty. --user and --computer set the
                                header's user and computer fields, which Bethesda's
                                compiler fills with the Windows account and machine
-                               name; the defaults are "skqe" and "papyrus"
+                               name; the defaults are "skqe" and "papyrus". The
+                               header's source field is the file name alone, never
+                               the path given. Every command takes --help
   check --parse <SourceDir>    parse every .psc below the folder with the compiler
                                front end; lists the files it cannot parse
   check --compile <SourceDir> --pex <input> [--import <dir;dir>] [--flags <flg>]
@@ -305,10 +308,13 @@ struct Options {
     std::vector<std::string> inputs;
 };
 
+int help();
+
 bool parse(int argc, char** argv, int from, Options& o, const char* cmd) {
     for (int i = from; i < argc; ++i) {
         const std::string a = argv[i];
         const bool hasNext = i + 1 < argc;
+        if (a == "--help" || a == "-h" || a == "/?") { help(); std::exit(0); }
         if (a == "--threads" && hasNext) o.threads = static_cast<unsigned>(std::atoi(argv[++i]));
         else if (a == "--quiet") o.quiet = true;
         else if (a == "--json") o.json = true;
