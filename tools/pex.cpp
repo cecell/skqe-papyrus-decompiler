@@ -141,7 +141,8 @@ commands
                                scans the input (a file, a folder, an archive)
                                and renumbers FormID literals paired with the
                                plugin, loose and inside archives alike. A
-                               FormID is 0x plus 6 or 8 hex digits, or decimal;
+                               FormID is 0x plus 1 to 8 hex digits (0x801 =
+                               0x000801), or decimal;
                                the low 24 bits count, each literal keeps its
                                high byte. --formids: one OLD:NEW per line. --map
                                is the same as an EslMapLib file, and renames the

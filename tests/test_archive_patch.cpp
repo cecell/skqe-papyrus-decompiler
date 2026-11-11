@@ -1412,7 +1412,10 @@ static void test_pairs(const fs::path& dir) {
     CHECK(parse_formid("16777216", v, why) && v == 16777216);
     CHECK(parse_formid("0", v, why) && v == 0);
     // 0x with the wrong number of digits.
-    CHECK(!parse_formid("0x801", v, why));
+    CHECK(parse_formid("0x801", v, why) && v == 0x801);
+    CHECK(parse_formid("0xA", v, why) && v == 0xA);
+    CHECK(parse_formid("0x0100ABCD", v, why) && v == 0x0100ABCD);
+    CHECK(!parse_formid("0x", v, why));
     CHECK(!parse_formid("0x00000801A", v, why));
     CHECK(!parse_formid("0xGGGGGG", v, why));
     // A hex value missing its prefix is refused, not read as decimal.

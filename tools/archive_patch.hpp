@@ -155,7 +155,8 @@ bool find_running_processes(const std::vector<std::string>& names, std::vector<s
 
 // --- FormID pairs on the command line -----------------------------------------
 
-// One FormID: 0x plus 6 or 8 hex digits, or a decimal number. A bare number with
+// One FormID: 0x plus 1 to 8 hex digits (0x801, 0x000801 and 0x00000801 are the
+// same value), or a decimal number. A bare number with
 // a leading zero or a hex letter is refused rather than guessed at: it is a hex
 // value missing its prefix, and read as decimal it would renumber the wrong form.
 bool parse_formid(std::string_view text, uint32_t& out, std::string& why);

@@ -1514,8 +1514,8 @@ bool parse_formid(std::string_view text, uint32_t& out, std::string& why) {
     const std::string shown(text);
     if (text.size() > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) {
         std::string_view digits = text.substr(2);
-        if (digits.size() != 6 && digits.size() != 8) {
-            why = "FormID " + shown + ": a hex FormID has 6 or 8 digits";
+        if (digits.empty() || digits.size() > 8) {
+            why = "FormID " + shown + ": a hex FormID has 1 to 8 digits after 0x";
             return false;
         }
         uint32_t v = 0;
