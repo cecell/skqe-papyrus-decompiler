@@ -12,6 +12,10 @@ of that library come from xEdit's definitions (`Core/wbDefinitionsTES5.pas`,
 `Core/wbDefinitionsCommon.pas`): condition function names and parameter types, the subrecords xEdit
 labels unused, the rules for comparing records, and xEdit's names for subrecords.
 
+`patterns.json` in the release zip is Skyrim Query Engine's catalog of plugin record layouts,
+which `pex audit --fills` reads plugins with. Its `_display` and `_names` sections hold xEdit's names
+for subrecords and remain available under the MPL 2.0.
+
 xEdit is by ElminsterAU, with updates since 2012 by Hlp, Zilav and Sharlikran.
 Source: <https://github.com/TES5Edit/TES5Edit>. Licence: Mozilla Public License 2.0, a copy of which is
 in [`LICENSES/MPL-2.0.txt`](LICENSES/MPL-2.0.txt). No xEdit source file is included, and those parts

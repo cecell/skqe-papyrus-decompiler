@@ -50,7 +50,7 @@ script on a modded machine, and the numbers are below. What it does:
    `patch --map` renumbers them in the compiled file, `closure` tells whether
    everything a script needs is present before anyone tries to compile it,
    `deps` says what a script needs an extender for.
-6. **A script auditor** (`pex audit`): seventeen rules over the decompiler's
+6. **A script auditor** (`pex audit`): twenty-three rules over the decompiler's
    view of a script that tell authors where it can misbehave at run time,
    in two groups. Threads that never end or pile up: loops that cannot end,
    spin without a `Wait`, or poll another object's state with no bound; update
@@ -59,17 +59,23 @@ script on a modded machine, and the numbers are below. What it does:
    unfiltered inventory handlers; events calling into one quest per actor or
    item; recursion. Wrong results: calls on values that can be None
    (`GetFormFromFile` first of all), arrays used before they exist,
-   off-by-one array loops, `GotoState` to a state that does not exist. The
+   off-by-one array loops, `GotoState` to a state that does not exist,
+   conditions that can never be true or are always true (`x == 1 && x == 2`,
+   `x != 1 || x != 2`, an `ElseIf` an earlier test already covers), code after
+   a `Return`, properties nothing reads or writes, states nothing enters, and,
+   with `--fills`, object properties a script reads that no plugin attaching
+   it fills (read from every active plugin's script data). The run-time
    rules are grounded in a corpus of 3,783 community save games read with
-   ReSaver (`tools/resaver`), in the author's own saves and Papyrus logs, and
-   measured: 1,258 findings in 953 of the 14,026 vanilla scripts, 139 of them
-   warnings or errors (every class inspected: Bethesda's own spin loops,
-   undeclared states and the weapon racks' cell events among them); 6,916 in
-   3,607 of the 73,690 distinct scripts of the modded folder, in 2.7 s; and
-   against the save corpus the rules fire in 8 of the test rig's 40 most
-   frequent stuck entry functions and 19 of a real playthrough's 40, in the
-   function itself, while staying silent on the entries that merely run once
-   per save. `pex audit --rules` lists the rules.
+   ReSaver (`tools/resaver`) and in the author's own saves and Papyrus logs.
+   Measured on the 14,026 vanilla scripts: 1,269 findings from the original
+   seventeen rules; the new ones find 8 condition and dead-code mistakes in
+   Bethesda's scripts (all eight confirmed in the sources: two dead `ElseIf`s
+   in the Companions' reward code, an always-true angle test in
+   `SlowdownStrikeScript`, code after a `Return` in four scripts), 13 states
+   never entered, 1,963 unused properties and, with `--fills`, 243 properties
+   read but never filled. The whole modded folder (73,728 distinct scripts,
+   2,424 plugins) audits in 8.4 s with `--fills`. `pex audit --rules` lists
+   the rules.
 7. **A semantic diff** (`pex diff`): what changed between two versions of a
    script, in plain English and with no AI involved: declarations (a property
    added, a parameter lost, a return type changed), then each function's
@@ -150,10 +156,11 @@ pex diff <old> <new> [--resolve <Data>] [--json] [--quiet]
                                  what changed between two versions of a script
                                  (two files, or two folders or archives matched
                                  by name), one sentence per change
-pex audit <input> [--resolve <Data>] [--json|--csv] [--rules]
+pex audit <input> [--resolve <Data>] [--json|--csv] [--rules] [--fills]
                                  risks for script authors, one line per finding
                                  (file, function, source line, rule, advice) and
-                                 a summary by rule
+                                 a summary by rule; --fills reads the load order's
+                                 plugins for properties no attachment fills
 pex closure <script.pex> --data <Data> [--import <dirs>] [--emit <dir>]
 pex patch <input> --plugin <Name.esp> --formid OLD:NEW[,OLD:NEW] [--formids <file>]
                   [--log <file>] [--dry-run] [--backup]

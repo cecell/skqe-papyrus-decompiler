@@ -1308,8 +1308,57 @@ Function Fine(Int x)
     EndIf
     level = 5
 EndFunction
+
+ObjectReference Property Needed Auto
+ObjectReference Property Optional Auto
+ObjectReference Property Filled Auto
+
+Function UseProperties()
+    Needed.Enable()
+    Filled.Enable()
+    If Optional
+        Optional.Enable()
+    EndIf
+EndFunction
+
+Function EnterLater(String asState)
+    GotoState(asState)
+EndFunction
+
+Function Enter()
+    EnterLater("Helper")
+EndFunction
+
+State Dead
+    Function Fine(Int x)
+    EndFunction
+EndState
+
+State Helper
+    Function Fine(Int x)
+    EndFunction
+EndState
 )";
     r.sources["weapon"] = "Scriptname Weapon extends Form\n";
+    r.sources["auditstatesonly"] = R"(Scriptname AuditStatesOnly extends ObjectReference
+
+Function Enter()
+    GotoState("Used")
+    Helper("ByHelper")
+EndFunction
+
+Function Helper(String asName)
+EndFunction
+
+State Used
+EndState
+
+State ByHelper
+EndState
+
+State Dead
+EndState
+)";
     r.sources["armor"] = "Scriptname Armor extends Form\n";
     r.sources["auditsample"] = R"(Scriptname AuditSample extends ObjectReference
 
@@ -1482,10 +1531,11 @@ EndEvent
             return it == scripts.end() ? nullptr : it->second;
         }
     } resolver;
-    Script sample, states, conditions, objectReference, form, scriptObject;
+    Script sample, states, conditions, statesOnly, objectReference, form, scriptObject;
     CHECK(compile_sample(r, "AuditSample", sample));
     CHECK(compile_sample(r, "AuditStates", states));
     CHECK(compile_sample(r, "AuditConditions", conditions));
+    CHECK(compile_sample(r, "AuditStatesOnly", statesOnly));
     CHECK(compile_sample(r, "ObjectReference", objectReference));
     CHECK(compile_sample(r, "Form", form));
     CHECK(compile_sample(r, "ScriptObject", scriptObject));
@@ -1550,7 +1600,7 @@ EndEvent
     CHECK(unknownStates == 1);  // "Bussy" only: "None" and the GetState flag "Flag" are not reported
     CHECK(count(b, "OnUpdate") == 0);  // the script has GotoState, so the re-arm has an exit
     CHECK(count(b, "OnItemAdded") == 0);  // filtered, and no quest call
-    CHECK(audit_rules().size() == 20);
+    CHECK(audit_rules().size() == 23);
 
     const AuditResult k = audit(conditions, opt);
     CHECK(k.skipped == 0);
@@ -1570,7 +1620,41 @@ EndEvent
     CHECK(has(k, "LoopReturns", "code-unreachable"));
     CHECK(!has(k, "LoopReturns", "condition-always-true"));  // While True is the loop rules' business
     CHECK(count(k, "Fine") == 0);
-    for (const Finding& f : k.findings) CHECK(f.line > 0);
+    for (const Finding& f : k.findings) {
+        if (f.rule.compare(0, 9, "property-") != 0 && f.rule != "state-unreachable") CHECK(f.line > 0);
+    }
+    // Properties: unused ones are reported, used ones not; without plugin data
+    // nothing is "unfilled".
+    CHECK(has(k, "Thing", "property-unused"));
+    CHECK(!has(k, "Needed", "property-unused"));
+    CHECK(!has(k, "Needed", "property-unfilled"));
+    // The script enters states with a computed name (EnterLater): no state is
+    // reported for it.
+    CHECK(!has(k, "", "state-unreachable"));
+    for (const Finding& f : k.findings) CHECK(f.rule != "state-unreachable");
+
+    // With an index of the set and plugin fills.
+    AuditIndex idx;
+    index_script(conditions, idx);
+    index_script(statesOnly, idx);
+    idx.fillsKnown = true;
+    idx.filled["auditconditions"] = {"filled"};
+    finish_index(idx);
+    AuditOptions withIndex = opt;
+    withIndex.index = &idx;
+    const AuditResult k2 = audit(conditions, withIndex);
+    CHECK(has(k2, "Needed", "property-unfilled"));     // read, attached, never filled, no default
+    CHECK(!has(k2, "Filled", "property-unfilled"));    // some attachment fills it
+    CHECK(!has(k2, "Optional", "property-unfilled"));  // tested before use: optional on purpose
+    const AuditResult so = audit(statesOnly, withIndex);
+    size_t unreachable = 0;
+    for (const Finding& f : so.findings) {
+        if (f.rule == "state-unreachable") {
+            ++unreachable;
+            CHECK(f.state == "dead");  // compiled state names are lowercase
+        }
+    }
+    CHECK(unreachable == 1);  // Used: GotoState literal; ByHelper: a literal handed to a helper
     // The message carries the counter nobody reads.
     for (const Finding& f : a.findings) {
         if (f.function == "LoopPollsWithWait") CHECK(f.message.find("tries counts them") != std::string::npos);

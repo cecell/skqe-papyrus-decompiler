@@ -76,7 +76,12 @@ if(SKQE_PAPYRUS_BUILD_TOOLS)
         set_property(TEST unit DIRECTORY ${skqe_lib_BINARY_DIR} PROPERTY DISABLED TRUE)
     endif()
 
-    add_executable(pex tools/pex.cpp tools/archive_patch.cpp tools/out_patch.cpp)
+    add_executable(pex tools/pex.cpp tools/archive_patch.cpp tools/out_patch.cpp tools/vmad_fills.cpp)
+    # audit --fills reads plugins with skqe's catalog, which pex looks for next
+    # to itself.
+    add_custom_command(TARGET pex POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${skqe_lib_SOURCE_DIR}/data/patterns.json
+                $<TARGET_FILE_DIR:pex>/patterns.json)
     if(WIN32)
         enable_language(RC)
         # Icon and version block. The version comes from project(), as a

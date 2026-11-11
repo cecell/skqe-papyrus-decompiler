@@ -15,6 +15,8 @@
 #include "papyrus/pex.hpp"
 
 #include <cstdint>
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -41,10 +43,41 @@ struct AuditRule {
     std::string summary;    // one line, for `pex audit --rules`
 };
 
+// What a whole set of scripts does with properties and states, for the rules
+// that need more than one script to decide (property-unused,
+// state-unreachable, property-unfilled). Build it with index_script over
+// every script the audit should know about (the audited ones and the ones
+// they resolve against). Names are lowercased.
+struct AuditIndex {
+    std::set<std::string> propertiesRead;     // read with PropGet by some script, on any object
+    std::set<std::string> propertiesWritten;  // written with PropSet by some script
+    std::set<std::string> statesEntered;      // passed as a literal to GotoState on any object
+    std::set<std::string> dynamicStateTypes;  // script types something calls GotoState on with a built name
+    std::set<std::string> stringLiterals;     // every short string literal any script uses (a state
+                                              // name handed to a helper that calls GotoState)
+    std::map<std::string, std::string> parentOf;  // script -> the script it extends
+    std::map<std::string, std::vector<std::string>> childrenOf;  // filled by finish_index
+    // Plugin data, when loaded (fillsKnown): for each script attached
+    // somewhere in the load order (VMAD), the properties some attachment
+    // fills. Quest aliases and fragments included.
+    bool fillsKnown = false;
+    std::map<std::string, std::set<std::string>> filled;
+};
+
+// Adds one script's facts to the index (instruction level, no decompiling).
+void index_script(const Script& script, AuditIndex& index);
+// Moves `from` into `into`.
+void merge_index(AuditIndex& into, AuditIndex&& from);
+// Call once after the last index_script / merge_index, before auditing.
+void finish_index(AuditIndex& index);
+
 struct AuditOptions {
     // Other scripts, for inherited states and declared types (optional; see
     // ScriptResolver in decompile.hpp). Not owned.
     ScriptResolver* resolver = nullptr;
+    // The whole set (optional, not owned). Without it the property and state
+    // rules only see this one script.
+    const AuditIndex* index = nullptr;
 };
 
 struct AuditResult {

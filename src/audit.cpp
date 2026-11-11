@@ -70,6 +70,9 @@ const char* const kArrayNone = "array-none";
 const char* const kConditionImpossible = "condition-impossible";
 const char* const kConditionAlwaysTrue = "condition-always-true";
 const char* const kCodeUnreachable = "code-unreachable";
+const char* const kPropertyUnused = "property-unused";
+const char* const kPropertyUnfilled = "property-unfilled";
+const char* const kStateUnreachable = "state-unreachable";
 
 // Two groups, in the order the summary prints them: first what leaves threads
 // in the save or starves the VM (what the save-game corpus shows), then what
@@ -95,6 +98,9 @@ const std::vector<AuditRule> kRules = {
     {kConditionImpossible, Severity::Warning, "results", "an If, ElseIf or While whose condition can never be true (x == 1 && x == 2, x > 5 && x < 3, an ElseIf an earlier test already covers)"},
     {kConditionAlwaysTrue, Severity::Warning, "results", "an If or While whose condition is always true (x != 1 || x != 2, x == x)"},
     {kCodeUnreachable, Severity::Warning, "results", "statements after a Return (or after a While True), or an Else the tests before it leave no value for"},
+    {kPropertyUnfilled, Severity::Warning, "results", "an object or array property the script reads that no plugin attaching the script fills and nothing assigns (needs --fills)"},
+    {kPropertyUnused, Severity::Info, "results", "a property no script of the audited set reads or writes"},
+    {kStateUnreachable, Severity::Info, "results", "a state no GotoState in the audited set enters, that is not the auto state"},
 };
 
 // Natives that park the thread until the game thread answers (latent), by
@@ -1427,6 +1433,279 @@ void rule_unreachable(Ctx& c, const FnView& v) {
     walk(v.stmts);
 }
 
+// --- properties nothing uses, states nothing enters, properties nothing fills ------
+
+// Scripts the Creation Kit writes for fragments: their properties are filled
+// for the fragments, and quest fragment scripts get one Alias_ property per
+// alias whether a fragment uses it or not.
+bool is_fragment_script(std::string_view lowerName) {
+    // QF_, TIF__, SF_, PF_, PRKF_, also after a prefix: DLC1_QF_..., BYOH_TIF__...
+    for (const char* p : {"qf_", "tif__", "sf_", "pf_", "prkf_"}) {
+        const size_t at = lowerName.find(p);
+        if (at != std::string_view::npos && (at == 0 || lowerName[at - 1] == '_')) return true;
+    }
+    return false;
+}
+
+template <class F>
+void each_function_of(const Object& o, F&& f) {
+    for (const Property& p : o.properties) {
+        if (p.getter) f(*p.getter, &p);
+        if (p.setter) f(*p.setter, &p);
+    }
+    for (const State& st : o.states) {
+        for (const NamedFunction& nf : st.functions) f(nf.body, nullptr);
+    }
+}
+
+bool flag_set(const Script& s, uint32_t userFlags, std::string_view name) {
+    for (const UserFlag& u : s.userFlags) {
+        if (eq_ci(s.str(u.name), name)) return (userFlags >> u.bit) & 1u;
+    }
+    return false;
+}
+
+// Does the script's own code touch a property (its autovar, or PropGet /
+// PropSet of that name), outside the property's own accessors?
+void own_property_use(const Script& s, const Object& o, const Property& p, bool& reads, bool& writes) {
+    reads = writes = false;
+    const std::string_view name = s.str(p.name);
+    each_function_of(o, [&](const Function& f, const Property* owner) {
+        if (owner == &p) return;
+        for (const Instruction& ins : f.code) {
+            if ((ins.op == Opcode::PropGet || ins.op == Opcode::PropSet) && !ins.args.empty() && ins.args[0].is_string_ref() &&
+                eq_ci(s.str(ins.args[0].str()), name)) {
+                (ins.op == Opcode::PropGet ? reads : writes) = true;
+                continue;
+            }
+            if (!p.is_auto()) continue;
+            for (size_t i = 0; i < ins.args.size(); ++i) {
+                const Value& a = ins.args[i];
+                if (a.type != ValueType::Identifier || a.str() != p.autoVar) continue;
+                // The destination operand of the opcodes that write one.
+                const bool dest = (i == 0 && (ins.op == Opcode::Assign || ins.op == Opcode::Cast)) ||
+                                  (i == 2 && (ins.op == Opcode::CallMethod || ins.op == Opcode::CallStatic || ins.op == Opcode::PropGet)) ||
+                                  (i == 1 && ins.op == Opcode::CallParent);
+                (dest ? writes : reads) = true;
+            }
+        }
+    });
+}
+
+void report_object(Ctx& c, const Object& o, const std::string& where, const std::string& state, const char* rule, std::string message,
+                   Severity* override = nullptr) {
+    Finding f;
+    f.object = std::string(c.str(o.name));
+    f.state = state;
+    f.function = where;
+    f.severity = override ? *override : severity_of(rule);
+    f.rule = rule;
+    f.message = std::move(message);
+    c.out.push_back(std::move(f));
+}
+
+// The scripts that extend `type`, directly or not (lowercased), from the index.
+std::set<std::string> descendants_of(const AuditIndex& idx, const std::string& type) {
+    std::set<std::string> out;
+    std::vector<std::string> todo{type};
+    while (!todo.empty()) {
+        const std::string t = todo.back();
+        todo.pop_back();
+        auto it = idx.childrenOf.find(t);
+        if (it == idx.childrenOf.end()) continue;
+        for (const std::string& child : it->second) {
+            if (out.insert(child).second) todo.push_back(child);
+        }
+    }
+    return out;
+}
+
+// property-unused, property-unfilled.
+void rule_properties(Ctx& c, const Object& o) {
+    const std::string self = lower(c.str(o.name));
+    if (is_fragment_script(self)) return;
+    const AuditIndex* idx = c.opt.index;
+    std::set<std::string> family;  // this script and every script extending it
+    bool attached = false;
+    if (idx && idx->fillsKnown) {
+        family = descendants_of(*idx, self);
+        family.insert(self);
+        for (const std::string& t : family) attached = attached || idx->filled.count(t);
+    }
+    for (const Property& p : o.properties) {
+        const std::string name(c.str(p.name));
+        const std::string key = lower(name);
+        if (flag_set(c.s, p.userFlags, "conditional")) continue;  // read by plugin conditions
+        bool reads = false, writes = false;
+        own_property_use(c.s, o, p, reads, writes);
+        const bool readElsewhere = idx && idx->propertiesRead.count(key);
+        const bool writtenElsewhere = idx && idx->propertiesWritten.count(key);
+        if (!reads && !writes && !readElsewhere && !writtenElsewhere) {
+            report_object(c, o, name, "", kPropertyUnused,
+                          "Property " + name + " is never read or written by this script" +
+                              std::string(idx ? " or any other script audited or resolved with it" : "") +
+                              "; unless a plugin condition (GetVMQuestVariable) or a script outside this set uses it, it can go, along with its fill in the plugin");
+            continue;
+        }
+        // Never filled: an object or array the script reads, nothing assigns,
+        // with no default, on a script some plugin attaches while no attachment
+        // of it (or of a script extending it) fills the property.
+        if (!idx || !idx->fillsKnown || !attached || !reads || writes || writtenElsewhere) continue;
+        const std::string type = lower(c.str(p.type));
+        if (type == "int" || type == "float" || type == "bool" || type == "string") continue;
+        if (p.is_auto()) {
+            bool hasDefault = false;
+            for (const Variable& v : o.variables) {
+                if (v.name == p.autoVar) hasDefault = v.initial.type != ValueType::None;
+            }
+            if (hasDefault || c.assignedVars.count(p.autoVar)) continue;
+        }
+        // A script that tests the property in a condition (If Prop, If Prop != None)
+        // treats it as optional: leaving it empty is the plugin author's choice.
+        bool tested = false;
+        for (const FnView& fv : c.fns) {
+            if (fv.o != &o) continue;
+            each_stmt(fv.stmts, 0, [&](const Stmt& st, int) {
+                if ((st.kind != StmtKind::If && st.kind != StmtKind::While) || !st.rhs) return;
+                each_expr(*st.rhs, [&](const Expr& e) {
+                    if (e.kind == ExprKind::Var && p.is_auto() && e.name == p.autoVar) tested = true;
+                    if (e.kind == ExprKind::PropGet && eq_ci(c.str(e.name), name)) tested = true;
+                });
+            });
+        }
+        if (tested) continue;
+        bool filled = false;
+        for (const std::string& t : family) {
+            auto it = idx->filled.find(t);
+            if (it != idx->filled.end() && it->second.count(key)) filled = true;
+        }
+        if (filled) continue;
+        report_object(c, o, name, "", kPropertyUnfilled,
+                      "Property " + name + " is read by the script, but no plugin in the load order that attaches " + std::string(c.str(o.name)) +
+                          " (or a script extending it) fills it and nothing assigns it, so it is None when read; fill it in the plugin, or assign it in OnInit");
+    }
+}
+
+// state-unreachable.
+void rule_states(Ctx& c, const Object& o) {
+    // A GotoState with a computed name could enter any state: say nothing.
+    std::set<std::string> ownLiterals;
+    bool computed = false;
+    each_function_of(o, [&](const Function& f, const Property*) {
+        for (const Instruction& ins : f.code) {
+            if (ins.op != Opcode::CallMethod || ins.args.size() < 4 || !ins.args[0].is_string_ref()) continue;
+            if (!eq_ci(c.str(ins.args[0].str()), "gotostate")) continue;
+            if (ins.args[3].type == ValueType::String) ownLiterals.insert(lower(c.str(ins.args[3].str())));
+            else computed = true;
+        }
+        for (const Instruction& ins : f.code) {
+            for (const Value& a : ins.args) {
+                if (a.type == ValueType::String) ownLiterals.insert(lower(c.str(a.str())));
+            }
+        }
+    });
+    if (computed) return;
+    // Nor when an ancestor does: SkyUI's SKI_ConfigBase enters a menu's option
+    // states by a name it builds, so every state of an MCM script is reached.
+    if (c.opt.resolver) {
+        std::string cur = lower(c.str(o.parent));
+        std::set<std::string> seen;
+        for (int guard = 0; guard < 32 && !cur.empty() && seen.insert(cur).second; ++guard) {
+            const Script* ps = c.opt.resolver->find(cur);
+            if (!ps || ps->objects.empty()) break;
+            const Object& po = ps->objects[0];
+            bool dynamic = false;
+            each_function_of(po, [&](const Function& f, const Property*) {
+                for (const Instruction& ins : f.code) {
+                    if (ins.op == Opcode::CallMethod && ins.args.size() >= 4 && ins.args[0].is_string_ref() &&
+                        eq_ci(ps->str(ins.args[0].str()), "gotostate") && ins.args[3].type != ValueType::String)
+                        dynamic = true;
+                }
+            });
+            if (dynamic) return;
+            cur = lower(ps->str(po.parent));
+        }
+    }
+    const AuditIndex* idx = c.opt.index;
+    // Another script enters this type's states (or its ancestors') by a built name.
+    if (idx && !idx->dynamicStateTypes.empty()) {
+        if (idx->dynamicStateTypes.count("*")) return;
+        std::string cur = lower(c.str(o.name));
+        std::set<std::string> seen;
+        for (int guard = 0; guard < 32 && !cur.empty() && seen.insert(cur).second; ++guard) {
+            if (idx->dynamicStateTypes.count(cur)) return;
+            auto it = idx->parentOf.find(cur);
+            cur = it == idx->parentOf.end() ? std::string() : it->second;
+        }
+    }
+    const std::string autoState = lower(c.str(o.autoState));
+    for (const State& st : o.states) {
+        const std::string name(c.str(st.name));
+        const std::string key = lower(name);
+        if (key.empty() || key == autoState) continue;
+        if (ownLiterals.count(key) || (idx && (idx->statesEntered.count(key) || idx->stringLiterals.count(key)))) continue;
+        const std::string first = st.functions.empty() ? std::string() : std::string(c.str(st.functions[0].name));
+        report_object(c, o, first, name, kStateUnreachable,
+                      "State " + name + " is never entered: no GotoState in this script" +
+                          std::string(idx ? " or any other script audited or resolved with it" : "") +
+                          " names it, and it is not the auto state, so its functions never run; check the spelling where it should be entered");
+    }
+}
+
+}  // namespace
+
+void index_script(const Script& s, AuditIndex& idx) {
+    for (const Object& o : s.objects) {
+        idx.parentOf[lower(s.str(o.name))] = lower(s.str(o.parent));
+        // The declared type of a slot a function names (parameter, local, temp,
+        // script variable), for GotoState calls on other objects.
+        auto type_in = [&](const Function& f, StrIdx name) -> std::string {
+            for (const Param& p : f.params) if (p.name == name) return lower(s.str(p.type));
+            for (const Param& p : f.locals) if (p.name == name) return lower(s.str(p.type));
+            for (const Variable& v : o.variables) if (v.name == name) return lower(s.str(v.type));
+            return std::string();
+        };
+        each_function_of(o, [&](const Function& f, const Property*) {
+            for (const Instruction& ins : f.code) {
+                if (ins.op == Opcode::CallMethod && ins.args.size() >= 4 && ins.args[0].is_string_ref() &&
+                    eq_ci(s.str(ins.args[0].str()), "gotostate") && ins.args[3].type != ValueType::String &&
+                    ins.args[1].type == ValueType::Identifier && !eq_ci(s.str(ins.args[1].str()), "self")) {
+                    const std::string t = type_in(f, ins.args[1].str());
+                    idx.dynamicStateTypes.insert(t.empty() ? std::string("*") : t);  // "*": a type not known
+                }
+                if ((ins.op == Opcode::PropGet || ins.op == Opcode::PropSet) && !ins.args.empty() && ins.args[0].is_string_ref())
+                    (ins.op == Opcode::PropGet ? idx.propertiesRead : idx.propertiesWritten).insert(lower(s.str(ins.args[0].str())));
+                else if (ins.op == Opcode::CallMethod && ins.args.size() >= 4 && ins.args[0].is_string_ref() &&
+                         eq_ci(s.str(ins.args[0].str()), "gotostate") && ins.args[3].type == ValueType::String)
+                    idx.statesEntered.insert(lower(s.str(ins.args[3].str())));
+                for (const Value& a : ins.args) {
+                    if (a.type == ValueType::String && s.str(a.str()).size() <= 64) idx.stringLiterals.insert(lower(s.str(a.str())));
+                }
+            }
+        });
+    }
+}
+
+void finish_index(AuditIndex& idx) {
+    idx.childrenOf.clear();
+    for (const auto& [child, parent] : idx.parentOf) {
+        if (!parent.empty()) idx.childrenOf[parent].push_back(child);
+    }
+}
+
+void merge_index(AuditIndex& into, AuditIndex&& from) {
+    into.propertiesRead.merge(from.propertiesRead);
+    into.propertiesWritten.merge(from.propertiesWritten);
+    into.statesEntered.merge(from.statesEntered);
+    into.stringLiterals.merge(from.stringLiterals);
+    into.dynamicStateTypes.merge(from.dynamicStateTypes);
+    into.parentOf.merge(from.parentOf);
+    if (from.fillsKnown) into.fillsKnown = true;
+    for (auto& [k, v] : from.filled) into.filled[k].merge(v);
+}
+
+namespace {
+
 // --- driver -------------------------------------------------------------------
 
 void collect_states(Ctx& c, const Object& o) {
@@ -1579,6 +1858,10 @@ AuditResult audit(const Script& s, const AuditOptions& opt) {
         rule_unreachable(c, v);
     }
     rule_update_pairs(c);
+    for (const Object& o : s.objects) {
+        rule_properties(c, o);
+        rule_states(c, o);
+    }
 
     // Function order, then instruction order (the per-script rule last).
     std::stable_sort(c.out.begin(), c.out.end(), [&](const Finding& a, const Finding& b) {

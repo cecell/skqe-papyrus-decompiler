@@ -17,6 +17,7 @@
 #include "process.hpp"
 #include "resolver.hpp"
 #include "roundtrip.hpp"
+#include "vmad_fills.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -94,13 +95,21 @@ commands
                                not declare (what the script needs an extender
                                for)
   audit <input> [--resolve <dir|bsa>] [--json|--csv] [--rules] [--all-copies]
+            [--fills [--data <Data>] [--load-order <plugins.txt>]]
                                static risks for script authors: loops that
                                cannot end or spin without Wait, update timers
                                never unregistered or re-armed without a stop,
                                calls on results that can be None, recursion,
                                off-by-one array loops, GotoState to a state
                                that does not exist, arrays used before they
-                               exist. One line per finding
+                               exist, conditions that can never be true or are
+                               always true (an ElseIf an earlier test covers),
+                               code after a Return, properties nothing uses,
+                               states nothing enters. --fills also reads the
+                               load order's plugins (the game found as for
+                               patch --out, or --data / --load-order) and reports
+                               object properties a script reads that no plugin
+                               attaching it fills. One line per finding
                                with file, function, source line, rule and
                                advice; a summary by rule at the end (--quiet:
                                the summary alone). --rules lists the rules.
@@ -315,6 +324,7 @@ struct Options {
     bool backup = false;
     bool comments = false;
     bool sourceFilename = false;  // recompile: cut the header's source field to its file name
+    bool fills = false;           // audit: read the load order's VMADs for property-unfilled
     bool keepGenerated = false;
     bool optionalObjects = false;
     std::string out;
@@ -351,6 +361,7 @@ bool parse(int argc, char** argv, int from, Options& o, const char* cmd) {
         else if (a == "--user" && hasNext) o.userName = argv[++i];
         else if (a == "--computer" && hasNext) o.computerName = argv[++i];
         else if (a == "--source-filename") o.sourceFilename = true;
+        else if (a == "--fills") o.fills = true;
         else if (a == "--resolve" && hasNext) o.resolve.push_back(argv[++i]);
         else if (a == "--vanilla" && hasNext) o.vanilla = argv[++i];
         else if (a == "--data" && hasNext) o.data = argv[++i];
@@ -1651,8 +1662,71 @@ int cmd_audit(int argc, char** argv) {
     pextool::ItemResolver resolver;
     resolver.add(extra);
     resolver.add(items);
+    // The whole set's facts (properties used, states entered, who extends
+    // whom): the audited scripts and everything they resolve against.
+    pex::AuditIndex index;
+    {
+        std::vector<pextool::Item> all = extra;
+        all.insert(all.end(), items.begin(), items.end());
+        all = pextool::effective_scripts(all);
+        std::mutex imu;
+        pextool::for_each_parallel(all, o.threads, [&](size_t, const pextool::Item& it, pextool::Loader& ld) {
+            pex::Script s;
+            std::vector<uint8_t> bytes;
+            std::string err;
+            if (!ld.load(it, bytes, err) || pex::read(bytes.data(), bytes.size(), s, &err) != pex::Status::Ok) return;
+            pex::AuditIndex local;
+            pex::index_script(s, local);
+            std::lock_guard<std::mutex> lk(imu);
+            pex::merge_index(index, std::move(local));
+        });
+    }
+    if (o.fills) {
+        // The game's Data folder: --data, else the input when it is one, else
+        // the installed game.
+        std::error_code ec;
+        fs::path data = o.data.empty() ? fs::path() : fs::u8path(o.data);
+        if (data.empty() && !o.inputs.empty() && fs::is_regular_file(fs::u8path(o.inputs[0]) / "Skyrim.esm", ec)) data = fs::u8path(o.inputs[0]);
+        pextool::GameStore store = pextool::GameStore::Steam;
+        if (data.empty()) {
+            pextool::GameInstall game;
+            std::string why;
+            if (!pextool::find_game(game, why)) {
+                std::fprintf(stderr, "audit --fills: cannot find the game's Data folder (%s); give it with --data <folder>\n", why.c_str());
+                return 2;
+            }
+            data = game.data;
+            store = game.store;
+        } else {
+            store = pextool::store_of_data(data);
+        }
+        const fs::path plugins = o.loadOrder.empty() ? pextool::default_plugins_txt(store) : fs::u8path(o.loadOrder);
+        if (plugins.empty() || !fs::is_regular_file(plugins, ec)) {
+            std::fprintf(stderr, "audit --fills: cannot find plugins.txt%s%s; give it with --load-order <file>\n", plugins.empty() ? "" : " at ",
+                         plugins.u8string().c_str());
+            return 2;
+        }
+        fs::path patterns = fs::u8path("patterns.json");
+#ifdef _WIN32
+        wchar_t exe[MAX_PATH];
+        const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+        if (n > 0 && n < MAX_PATH) patterns = fs::path(exe).parent_path() / "patterns.json";
+#endif
+        pextool::FillsReport rep;
+        std::string why;
+        const auto tf = std::chrono::steady_clock::now();
+        if (!pextool::load_vmad_fills(data, plugins, patterns, o.threads, index, rep, why)) {
+            std::fprintf(stderr, "audit --fills: %s\n", why.c_str());
+            return 2;
+        }
+        if (!why.empty()) std::fprintf(stderr, "audit --fills: %s\n", why.c_str());
+        std::fprintf(stderr, "fills: %zu plugins, %zu script attachments, %zu scripts attached, %.1fs\n", rep.plugins, rep.attachments, rep.scripts,
+                     std::chrono::duration<double>(std::chrono::steady_clock::now() - tf).count());
+    }
+    pex::finish_index(index);
     pex::AuditOptions aopt;
     aopt.resolver = &resolver;
+    aopt.index = &index;
     struct RuleTally {
         size_t findings = 0, scripts = 0;
     };
