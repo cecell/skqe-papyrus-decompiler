@@ -50,6 +50,11 @@ namespace {
 const char* kHelp = R"(pex - compiled Papyrus script (.pex) tool, Skyrim LE/SE
 
 usage: pex <command> <input> [options]
+       pex <command> --help [--json]
+       pex help [--json]
+
+  --help prints one command's help (a command that needs an input prints it
+  when given none, too); --json prints help as one line of JSON.
 
   <input> is a .pex file, a directory (every .pex below it, loose and inside
   every .bsa) or a single .bsa.
@@ -222,7 +227,7 @@ commands
                                compiler fills with the Windows account and machine
                                name; the defaults are "skqe" and "papyrus". The
                                header's source field is the file name alone, never
-                               the path given. Every command takes --help
+                               the path given
   recompile <input> [--user <name>] [--computer <name>] [--source-filename] [--out <dir>]
             [--dry-run]
                                rewrites the header fields that say who built a
@@ -337,12 +342,13 @@ struct Options {
 };
 
 int help();
+int print_help(const std::string& only, bool json);
 
 bool parse(int argc, char** argv, int from, Options& o, const char* cmd) {
     for (int i = from; i < argc; ++i) {
         const std::string a = argv[i];
         const bool hasNext = i + 1 < argc;
-        if (a == "--help" || a == "-h" || a == "/?") { help(); std::exit(0); }
+        if (a == "--help" || a == "-h" || a == "/?") std::exit(print_help(cmd, false));
         if (a == "--threads" && hasNext) o.threads = static_cast<unsigned>(std::atoi(argv[++i]));
         else if (a == "--quiet") o.quiet = true;
         else if (a == "--json") o.json = true;
@@ -2687,10 +2693,229 @@ int cmd_winners(int argc, char** argv) {
     return 0;
 }
 
-int help() {
-    std::fputs(kHelp, stdout);
+
+}  // namespace
+
+namespace {
+
+// --- help: the whole text, one command's part of it, or either as JSON -----------
+
+// The help text (kHelp) is read back into parts: the lines before "commands",
+// one block per command form (a line "  <command> ..." and the lines indented
+// under it), the notes after the last form, and the common options. One
+// command's help is its blocks, the notes that name it, and the common options.
+struct HelpForm {
+    std::string command;      // "patch"
+    std::vector<std::string> lines;
+};
+struct HelpModel {
+    std::vector<std::string> head;    // up to and without "commands"
+    std::vector<HelpForm> forms;
+    std::vector<std::vector<std::string>> notes;  // paragraphs between the forms and "common options"
+    std::vector<std::string> tail;    // "common options" to the end
+};
+
+const char* const kCommands[] = {"info",  "json",    "asm",   "assemble", "compile",   "decompile", "refs",  "deps",
+                                 "audit", "diff",    "closure", "patch",  "winners",  "recompile", "check", "help"};
+
+bool is_command(std::string_view w) {
+    for (const char* c : kCommands) {
+        if (w == c) return true;
+    }
+    return false;
+}
+
+std::string full_help() {
+    std::string s = kHelp;
+    return s;
+}
+
+HelpModel help_model() {
+    HelpModel m;
+    std::vector<std::string> lines;
+    {
+        const std::string text = full_help();
+        size_t at = 0;
+        while (at <= text.size()) {
+            const size_t nl = text.find('\n', at);
+            lines.push_back(text.substr(at, nl == std::string::npos ? std::string::npos : nl - at));
+            if (nl == std::string::npos) break;
+            at = nl + 1;
+        }
+        while (!lines.empty() && lines.back().empty()) lines.pop_back();
+    }
+    enum { Head, Forms, Notes, Tail } part = Head;
+    for (const std::string& ln : lines) {
+        if (part == Head) {
+            if (ln == "commands") part = Forms;
+            else m.head.push_back(ln);
+            continue;
+        }
+        if (ln == "common options") part = Tail;
+        if (part == Tail) {
+            m.tail.push_back(ln);
+            continue;
+        }
+        const bool topLevel = ln.size() > 2 && ln[0] == ' ' && ln[1] == ' ' && ln[2] != ' ';
+        if (topLevel) {
+            const std::string word = ln.substr(2, ln.find(' ', 2) == std::string::npos ? std::string::npos : ln.find(' ', 2) - 2);
+            if (part == Forms && is_command(word)) {
+                m.forms.push_back(HelpForm{word, {ln}});
+                continue;
+            }
+            part = Notes;
+            if (m.notes.empty() || m.notes.back().empty()) m.notes.emplace_back();
+            m.notes.back().push_back(ln);
+            continue;
+        }
+        if (ln.empty()) {
+            if (part == Notes && !m.notes.empty() && !m.notes.back().empty()) m.notes.emplace_back();
+            continue;
+        }
+        if (part == Forms && !m.forms.empty()) m.forms.back().lines.push_back(ln);
+        else if (part == Notes && !m.notes.empty()) m.notes.back().push_back(ln);
+    }
+    while (!m.notes.empty() && m.notes.back().empty()) m.notes.pop_back();
+    return m;
+}
+
+std::string trim_copy(std::string_view v) {
+    size_t a = 0, b = v.size();
+    while (a < b && (v[a] == ' ' || v[a] == '\t')) ++a;
+    while (b > a && (v[b - 1] == ' ' || v[b - 1] == '\t')) --b;
+    return std::string(v.substr(a, b - a));
+}
+
+// A form's usage (the command line and its continuation lines) and its
+// description (the text in the right-hand column), as plain strings.
+void split_form(const HelpForm& f, std::string& usage, std::string& description) {
+    const size_t kCol = 31;  // where the description column starts
+    auto add = [](std::string& to, const std::string& piece) {
+        if (piece.empty()) return;
+        if (!to.empty()) to += ' ';
+        to += piece;
+    };
+    for (const std::string& ln : f.lines) {
+        if (ln.size() > kCol && ln.compare(0, kCol, std::string(kCol, ' ')) == 0) {
+            add(description, trim_copy(ln));
+        } else if (ln.size() > kCol + 1 && ln[kCol - 2] == ' ' && ln[kCol - 1] == ' ' && ln[kCol] != ' ' &&
+                   trim_copy(std::string_view(ln).substr(0, kCol)).size() > 0) {
+            add(usage, trim_copy(std::string_view(ln).substr(0, kCol)));
+            add(description, trim_copy(std::string_view(ln).substr(kCol)));
+        } else {
+            add(usage, trim_copy(ln));
+        }
+    }
+    usage = "pex " + usage;
+}
+
+// The notes that belong to a command: those naming it ("For json and asm",
+// "decompiles it" for decompile).
+bool note_is_about(const std::vector<std::string>& note, const std::string& cmd) {
+    std::string text;
+    for (const std::string& l : note) text += " " + l;
+    if (cmd == "decompile") return text.find("decompiles") != std::string::npos;
+    return text.find(" " + cmd + " ") != std::string::npos || text.find(" " + cmd + ",") != std::string::npos;
+}
+
+int print_help(const std::string& only, bool json) {
+    const HelpModel m = help_model();
+    if (!only.empty() && !is_command(only)) {
+        std::fprintf(stderr, "no command named %s; the commands:", only.c_str());
+        for (const char* c : kCommands) std::fprintf(stderr, " %s", c);
+        std::fprintf(stderr, "\n");
+        return 2;
+    }
+    if (json) {
+        std::string out = "{\"tool\":\"pex\",\"version\":" + json_str(pex::kVersion);
+        out += ",\"usage\":" + json_str(only.empty() ? "pex <command> <input> [options]" : "pex " + only + " ...");
+        out += ",\"commands\":[";
+        bool first = true;
+        for (const char* c : kCommands) {
+            if (!only.empty() && only != c) continue;
+            std::vector<std::pair<std::string, std::string>> parts;
+            for (const HelpForm& f : m.forms) {
+                if (f.command != c) continue;
+                std::string usage, description;
+                split_form(f, usage, description);
+                parts.emplace_back(usage, description);
+            }
+            // A form written without text shares the next form's (the text
+            // describes both).
+            for (size_t i = parts.size(); i-- > 1;) {
+                if (parts[i - 1].second.empty()) parts[i - 1].second = parts[i].second;
+            }
+            std::string forms;
+            for (const auto& [usage, description] : parts) {
+                if (!forms.empty()) forms += ",";
+                forms += "{\"usage\":" + json_str(usage) + ",\"description\":" + json_str(description) + "}";
+            }
+            if (forms.empty() && std::string(c) != "help") continue;
+            if (!first) out += ",";
+            first = false;
+            out += "{\"name\":" + json_str(c) + ",\"forms\":[" + forms + "]";
+            std::string notes;
+            for (const auto& n : m.notes) {
+                if (!only.empty() && !note_is_about(n, only)) continue;
+                if (only.empty()) continue;
+                std::string text;
+                for (const std::string& l : n) text += (text.empty() ? "" : " ") + trim_copy(l);
+                notes += (notes.empty() ? "" : ",") + json_str(text);
+            }
+            if (!notes.empty()) out += ",\"notes\":[" + notes + "]";
+            out += "}";
+        }
+        out += "]";
+        if (only.empty()) {
+            std::string notes;
+            for (const auto& n : m.notes) {
+                std::string text;
+                for (const std::string& l : n) text += (text.empty() ? "" : " ") + trim_copy(l);
+                notes += (notes.empty() ? "" : ",") + json_str(text);
+            }
+            out += ",\"notes\":[" + notes + "]";
+        }
+        // Common options and exit codes.
+        std::string opts, exits;
+        for (const std::string& l : m.tail) {
+            if (l.compare(0, 4, "  --") == 0) {
+                const size_t sp = l.find("  ", 4);
+                const std::string opt = trim_copy(l.substr(2, sp == std::string::npos ? std::string::npos : sp - 2));
+                const std::string desc = sp == std::string::npos ? std::string() : trim_copy(l.substr(sp));
+                opts += (opts.empty() ? "" : ",") + std::string("{\"option\":") + json_str(opt) + ",\"description\":" + json_str(desc) + "}";
+            } else if (l.compare(0, 11, "exit codes:") == 0) {
+                exits = trim_copy(l.substr(11));
+            }
+        }
+        out += ",\"commonOptions\":[" + opts + "],\"exitCodes\":" + json_str(exits) + "}\n";
+        std::fputs(out.c_str(), stdout);
+        return 0;
+    }
+    if (only.empty()) {
+        std::fputs(kHelp, stdout);
+        return 0;
+    }
+    std::string out;
+    if (!m.head.empty()) out += m.head[0] + "\n\n";
+    out += "usage:\n";
+    for (const HelpForm& f : m.forms) {
+        if (f.command != only) continue;
+        for (const std::string& l : f.lines) out += l + "\n";
+    }
+    for (const auto& n : m.notes) {
+        if (!note_is_about(n, only)) continue;
+        out += "\n";
+        for (const std::string& l : n) out += l + "\n";
+    }
+    if (only == "help") out += "                               pex help [<command>] [--json]; pex <command> --help [--json]\n";
+    out += "\n";
+    for (const std::string& l : m.tail) out += l + "\n";
+    out += "\n`pex help` lists every command; --json gives this as one line of JSON.\n";
+    std::fputs(out.c_str(), stdout);
     return 0;
 }
+
+int help() { return print_help(std::string(), false); }
 
 }  // namespace
 
@@ -2775,7 +3000,24 @@ int main(int argc, char** argv_) {
     const std::string cmd = argv[1];
     if (argc == 2 && pextool::iequals_ext(fs::u8path(cmd), ".pex") && fs::is_regular_file(fs::u8path(cmd)))
         return open_with(cmd);
-    if (cmd == "help" || cmd == "--help" || cmd == "-h" || cmd == "/?") return help();
+    // Help: `pex help [<command>] [--json]`, `pex --help [--json]`,
+    // `pex <command> --help [--json]` anywhere on the line, and `pex <command>`
+    // alone for the commands that need an input.
+    {
+        bool wantHelp = cmd == "help" || cmd == "--help" || cmd == "-h" || cmd == "/?";
+        bool json = false;
+        std::string only;
+        for (int i = 1; i < argc; ++i) {
+            const std::string a = argv[i];
+            if (a == "--help" || a == "-h" || a == "/?") wantHelp = true;
+            else if (a == "--json") json = true;
+            else if (i >= 2 && cmd == "help" && only.empty() && a[0] != '-') only = a;
+        }
+        if (cmd != "help" && cmd[0] != '-') only = cmd;
+        if (wantHelp) return print_help(only, json);
+        const bool runsWithoutInput = cmd == "refs" || cmd == "winners";
+        if (argc == 2 && is_command(cmd) && !runsWithoutInput) return print_help(cmd, false) == 0 ? 2 : 2;
+    }
     if (cmd == "--version" || cmd == "-V") {
         std::printf("pex %s\n", pex::kVersion);
         return 0;
