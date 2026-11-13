@@ -274,7 +274,7 @@ commands
                                clashes. Reports incomplete closures before
                                compiling and compiles byte-identical
                                duplicates once.
-  help
+  help [<command>] [--json]    this text, or one command's part of it
 
   pex.exe <file.pex> alone (Explorer's "Open with", or a file dragged onto the
   exe) decompiles it to <name>.psc in the same folder and asks before
@@ -2907,7 +2907,6 @@ int print_help(const std::string& only, bool json) {
         out += "\n";
         for (const std::string& l : n) out += l + "\n";
     }
-    if (only == "help") out += "                               pex help [<command>] [--json]; pex <command> --help [--json]\n";
     out += "\n";
     for (const std::string& l : m.tail) out += l + "\n";
     out += "\n`pex help` lists every command; --json gives this as one line of JSON.\n";
