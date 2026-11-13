@@ -51,8 +51,9 @@ const char* kHelp = R"(pex - compiled Papyrus script (.pex) tool, Skyrim LE/SE
 
 usage: pex <command> <input> [options]
        pex <command> --help [--json]
-       pex help [--json]
+       pex help [--all] [--json]
 
+  pex help lists the ops with one sentence each; --all prints this full text.
   --help prints one command's help (a command that needs an input prints it
   when given none, too); --json prints help as one line of JSON.
 
@@ -274,7 +275,9 @@ commands
                                clashes. Reports incomplete closures before
                                compiling and compiles byte-identical
                                duplicates once.
-  help [<command>] [--json]    this text, or one command's part of it
+  help [<command>] [--all] [--json]
+                               the list of ops, one command's help, or with --all
+                               this full text
 
   pex.exe <file.pex> alone (Explorer's "Open with", or a file dragged onto the
   exe) decompiles it to <name>.psc in the same folder and asks before
@@ -2818,6 +2821,83 @@ bool note_is_about(const std::vector<std::string>& note, const std::string& cmd)
     return text.find(" " + cmd + " ") != std::string::npos || text.find(" " + cmd + ",") != std::string::npos;
 }
 
+// The short list `pex help` prints: per op, its main usage and one sentence,
+// enough to decide whether to look closer; and examples for each op's own
+// help. Kept by hand; the full text (kHelp) stays the reference.
+struct OpSummary {
+    const char* name;
+    const char* usage;
+    const char* summary;
+    std::vector<const char*> examples;
+};
+
+const std::vector<OpSummary>& op_summaries() {
+    static const std::vector<OpSummary> k = {
+        {"info", "pex info <input> [--json]", "Shows the header facts and counts of compiled scripts.",
+         {"pex info \"Data\\Scripts\\MyScript.pex\""}},
+        {"json", "pex json <input> [--out <path>]", "Writes a compiled script's whole model as JSON.",
+         {"pex json MyScript.pex --out MyScript.json"}},
+        {"asm", "pex asm <input> [--out <path>]", "Writes a compiled script as Papyrus assembly.",
+         {"pex asm MyScript.pex --out MyScript.pas"}},
+        {"assemble", "pex assemble <listing.pas|dir> [--out <path>]", "Turns Papyrus assembly back into a compiled script.",
+         {"pex assemble MyScript.pas --out MyScript.pex"}},
+        {"compile", "pex compile <psc|dir> --flags <flg> [--import <dirs>] [--out <dir>]",
+         "Compiles Papyrus source (.psc) to .pex, with no Creation Kit needed.",
+         {"pex compile MyScript.psc --flags \"Data\\Source\\Scripts\\TESV_Papyrus_Flags.flg\" --import \"Data\\Source\\Scripts\" --out Scripts",
+          "pex compile MyScript.psc --flags TESV_Papyrus_Flags.flg --user \"Mod Author\" --computer \"Build Box\""}},
+        {"decompile", "pex decompile <input> [--out <path>] [--resolve <Data>]", "Turns compiled scripts back into Papyrus source.",
+         {"pex decompile \"Data\\Scripts\\MyScript.pex\" --out MyScript.psc --resolve Data",
+          "pex decompile \"Data\\MyMod.bsa\" --out Source --resolve Data"}},
+        {"refs", "pex refs [<input>] [--plugin <Name.esp>] [--csv]",
+         "Lists every FormID scripts pass to GetFormFromFile, with its plugin; alone it reads the installed game.",
+         {"pex refs Data --plugin MyMod.esp --csv", "pex refs --plugin MyMod.esp"}},
+        {"deps", "pex deps <input> [--resolve <Data>]", "Shows what a script needs: parents, types, calls and script extenders.",
+         {"pex deps MyScript.pex --resolve Data --vanilla \"Data\\Skyrim - Misc.bsa\""}},
+        {"audit", "pex audit <input> [--resolve <Data>] [--fills]",
+         "Finds script mistakes and run-time risks: endless loops, calls on None, dead code, unfilled properties.",
+         {"pex audit MyScript.pex --resolve Data", "pex audit Data --resolve Data --fills --csv"}},
+        {"diff", "pex diff <old> <new>", "Says in plain English what changed between two versions of a script.",
+         {"pex diff old\\MyScript.pex new\\MyScript.pex", "pex diff \"Skyrim - Misc.bsa\" \"unofficial skyrim special edition patch.bsa\" --quiet"}},
+        {"closure", "pex closure <script.pex> --data <Data>",
+         "Checks that every script a script depends on exists and declares what it uses.", {"pex closure MyScript.pex --data Data"}},
+        {"patch", "pex patch <input> --plugin <Name.esp> --formid OLD:NEW",
+         "Renumbers FormIDs inside compiled scripts, loose or in BSAs, with an undo journal.",
+         {"pex patch Data --plugin MyMod.esp --formid 0x801:0x802 --dry-run",
+          "pex patch --out \"C:\\Mods\\MyMod Script Patch\" --plugin MyMod.esp --formid 0x801:0x802"}},
+        {"winners", "pex winners [<Data>]", "Lists which copy of each script the game loads; alone it reads the installed game.",
+         {"pex winners > winners.csv"}},
+        {"recompile", "pex recompile <input> --user <name> --computer <name> [--source-filename]",
+         "Changes the user, computer and source names stored in compiled scripts, and nothing else.",
+         {"pex recompile \"Data\\Scripts\" --user \"Mod Author\" --computer \"Build Box\" --source-filename"}},
+        {"check", "pex check --rewrite|--asm|--assemble|--compile|--roundtrip <input> ...",
+         "Measures pex against Bethesda's own tools over many scripts at once.", {"pex check --rewrite Data"}},
+        {"help", "pex help [<op>] [--all] [--json]", "Shows this list, one op's help, every op's help (--all), or any of them as JSON.",
+         {"pex help audit", "pex help --json"}},
+    };
+    return k;
+}
+
+const OpSummary* op_summary(const std::string& name) {
+    for (const OpSummary& o : op_summaries()) {
+        if (name == o.name) return &o;
+    }
+    return nullptr;
+}
+
+int print_index() {
+    std::string out = "Use pex.exe <op> for detailed info.\n\n";
+    for (const OpSummary& o : op_summaries()) {
+        out += o.usage;
+        out += "\n    ";
+        out += o.summary;
+        out += "\n";
+    }
+    out += "\n<input> is a .pex file, a folder (every .pex below it, loose and in every .bsa) or one .bsa.\n"
+           "A .pex opened with pex.exe (Open with, or dragged onto it) is decompiled next to itself.\n";
+    std::fputs(out.c_str(), stdout);
+    return 0;
+}
+
 int print_help(const std::string& only, bool json) {
     const HelpModel m = help_model();
     if (!only.empty() && !is_command(only)) {
@@ -2853,7 +2933,13 @@ int print_help(const std::string& only, bool json) {
             if (forms.empty() && std::string(c) != "help") continue;
             if (!first) out += ",";
             first = false;
-            out += "{\"name\":" + json_str(c) + ",\"forms\":[" + forms + "]";
+            out += "{\"name\":" + json_str(c);
+            if (const OpSummary* sum = op_summary(c)) {
+                out += ",\"summary\":" + json_str(sum->summary) + ",\"examples\":[";
+                for (size_t e = 0; e < sum->examples.size(); ++e) out += (e ? "," : "") + json_str(sum->examples[e]);
+                out += "]";
+            }
+            out += ",\"forms\":[" + forms + "]";
             std::string notes;
             for (const auto& n : m.notes) {
                 if (!only.empty() && !note_is_about(n, only)) continue;
@@ -2896,7 +2982,7 @@ int print_help(const std::string& only, bool json) {
         return 0;
     }
     std::string out;
-    if (!m.head.empty()) out += m.head[0] + "\n\n";
+    if (const OpSummary* sum = op_summary(only)) out += std::string("pex ") + only + ": " + sum->summary + "\n\n";
     out += "usage:\n";
     for (const HelpForm& f : m.forms) {
         if (f.command != only) continue;
@@ -2907,9 +2993,13 @@ int print_help(const std::string& only, bool json) {
         out += "\n";
         for (const std::string& l : n) out += l + "\n";
     }
+    if (const OpSummary* sum = op_summary(only)) {
+        out += "\nexamples:\n";
+        for (const char* e : sum->examples) out += std::string("  ") + e + "\n";
+    }
     out += "\n";
     for (const std::string& l : m.tail) out += l + "\n";
-    out += "\n`pex help` lists every command; --json gives this as one line of JSON.\n";
+    out += "\n`pex help` lists every op; --json gives this as one line of JSON.\n";
     std::fputs(out.c_str(), stdout);
     return 0;
 }
@@ -2995,7 +3085,7 @@ int wmain(int argc, wchar_t** wargv) {
 int main(int argc, char** argv_) {
     std::vector<char*> argv(argv_, argv_ + argc + 1);
 #endif
-    if (argc < 2) return help(), 2;
+    if (argc < 2) return print_index(), 2;
     const std::string cmd = argv[1];
     if (argc == 2 && pextool::iequals_ext(fs::u8path(cmd), ".pex") && fs::is_regular_file(fs::u8path(cmd)))
         return open_with(cmd);
@@ -3004,16 +3094,20 @@ int main(int argc, char** argv_) {
     // alone for the commands that need an input.
     {
         bool wantHelp = cmd == "help" || cmd == "--help" || cmd == "-h" || cmd == "/?";
-        bool json = false;
+        bool json = false, all = false;
         std::string only;
         for (int i = 1; i < argc; ++i) {
             const std::string a = argv[i];
             if (a == "--help" || a == "-h" || a == "/?") wantHelp = true;
             else if (a == "--json") json = true;
+            else if (a == "--all") all = true;
             else if (i >= 2 && cmd == "help" && only.empty() && a[0] != '-') only = a;
         }
         if (cmd != "help" && cmd[0] != '-') only = cmd;
-        if (wantHelp) return print_help(only, json);
+        if (wantHelp) {
+            if (only.empty() && !json && !all) return print_index();
+            return print_help(only, json);
+        }
         const bool runsWithoutInput = cmd == "refs" || cmd == "winners";
         if (argc == 2 && is_command(cmd) && !runsWithoutInput) return print_help(cmd, false) == 0 ? 2 : 2;
     }

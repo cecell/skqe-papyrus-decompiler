@@ -205,10 +205,11 @@ pex check --roundtrip <input> --tools "<game>\Papyrus Compiler" [--resolve <Data
 every `.bsa`) or one `.bsa`. Work is spread over all cores. `pex help` has
 the details.
 
-`pex <command> --help` prints that command's help alone (a command that needs an input also prints
-it when given none), and `--json` prints help as one line of JSON: `pex help --json` for every
-command, `pex <command> --help --json` for one, each with its usage forms, descriptions, notes,
-common options and exit codes.
+`pex help` (or `pex` alone) lists the ops, each with its main usage and one sentence. `pex <op>
+--help` prints that op's full help with examples (an op that needs an input also prints it when
+given none), and `pex help --all` the full text of every op. `--json` prints any of them as one
+line of JSON: `pex help --json` for every op, `pex <op> --help --json` for one, each with its
+summary, examples, usage forms, descriptions, notes, common options and exit codes.
 
 Speed (modded Data folder, 77,000 scripts, 32 threads, 2026-11-03 unless
 said): decompiling the 67,937 scripts of a Vortex staging folder, loose and
