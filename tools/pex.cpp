@@ -80,10 +80,12 @@ commands
                                "= None" (for import sets that must compile
                                against each other)
   refs [<input>] [--csv] [--callee Name,...] [--plugin Name.esp] [--out <folder>]
-                               with no input (or with --out or --load-order),
-                               only the copy of each script the game would load,
-                               with a copyHash of its contents; --out leaves out
-                               that folder's own files, installed or not. With an
+                               `pex refs` alone prints this help. With options
+                               but no input (or with --out or --load-order),
+                               the installed game: only the copy of each script
+                               it would load, with a copyHash of its contents;
+                               --out leaves out that folder's own files,
+                               installed or not. With an
                                input named by hand, every copy in it. Lists
                                every integer that reaches a FormID-taking
                                call (GetFormFromFile, GetForm, GetFormEx, any
@@ -2849,7 +2851,7 @@ const std::vector<OpSummary>& op_summaries() {
          {"pex decompile \"Data\\Scripts\\MyScript.pex\" --out MyScript.psc --resolve Data",
           "pex decompile \"Data\\MyMod.bsa\" --out Source --resolve Data"}},
         {"refs", "pex refs [<input>] [--plugin <Name.esp>] [--csv]",
-         "Lists every FormID scripts pass to GetFormFromFile, with its plugin; alone it reads the installed game.",
+         "Lists every FormID scripts pass to GetFormFromFile, with its plugin; with options but no input, the installed game's.",
          {"pex refs Data --plugin MyMod.esp --csv", "pex refs --plugin MyMod.esp"}},
         {"deps", "pex deps <input> [--resolve <Data>]", "Shows what a script needs: parents, types, calls and script extenders.",
          {"pex deps MyScript.pex --resolve Data --vanilla \"Data\\Skyrim - Misc.bsa\""}},
@@ -3108,7 +3110,7 @@ int main(int argc, char** argv_) {
             if (only.empty() && !json && !all) return print_index();
             return print_help(only, json);
         }
-        const bool runsWithoutInput = cmd == "refs" || cmd == "winners";
+        const bool runsWithoutInput = cmd == "winners";
         if (argc == 2 && is_command(cmd) && !runsWithoutInput) return print_help(cmd, false) == 0 ? 2 : 2;
     }
     if (cmd == "--version" || cmd == "-V") {

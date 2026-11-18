@@ -147,8 +147,9 @@ pex decompile <input> [--out <path>] [--resolve <Data>]
                                  Papyrus source; --resolve lets it consult the
                                  other scripts (parent chains, declarations)
 pex refs [<input>] [--csv] [--plugin <Name.esp>] [--out <folder>]
-                                 FormID literals and their plugin names; with no
-                                 input, only the copy of each script the game loads,
+                                 FormID literals and their plugin names; alone it
+                                 prints its help; with options but no input, only
+                                 the copy of each script the installed game loads,
                                  with a hash of it; --plugin keeps the call sites
                                  naming that plugin and prints a count to stderr
 pex deps <input> [--resolve <Data>] [--vanilla <Misc.bsa>]
