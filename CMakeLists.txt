@@ -53,12 +53,12 @@ endif()
 if(SKQE_PAPYRUS_BUILD_TOOLS)
     # bsa-reader (GPL-3.0, github.com/cecell/bsa-reader) reads scripts out of
     # archives for the tool only; the library itself has no dependencies.
-    # Pinned to the commit of tag v0.1.1; library changes go to that repo,
+    # Pinned to a commit of its main (v0.1.1 plus a hash fix); library changes go to that repo,
     # then bump this pin.
     include(FetchContent)
     FetchContent_Declare(bsa_reader
         GIT_REPOSITORY https://github.com/cecell/bsa-reader.git
-        GIT_TAG 88e40b4022050d0ea7d850a7804c56dcca58b77f)  # v0.1.1
+        GIT_TAG e6241bd0be1dcc938738f8434c85a87a1ce8fa79)  # main 2026-11-09: v0.1.1 plus the engine's hash in three corner cases
     # skqe, the library of Skyrim Query Engine (GPL-3.0,
     # github.com/cecell/skyrim-query-engine): the
     # load order and which archives load, for patch --out and winners, so that
